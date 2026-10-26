@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { Component, useState, type ReactNode } from "react";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   Activity, BarChart3, Bell, Cable, ClipboardList, Gauge, HeartPulse, History, LogOut, Menu, Moon, Network,
   OctagonX, Router as RouterIcon, Settings, ShieldAlert, ShieldBan, Sun, Swords, Users, Waypoints, Globe2,
@@ -144,6 +144,30 @@ function RouterLamp() {
   );
 }
 
+/** A page that fails to render shows what happened instead of a blank screen. */
+class PageBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error) { console.error("page failed to render", error); }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="space-y-3">
+        <h1 className="wide text-[24px] font-semibold">This page could not be shown</h1>
+        <Notice tone="attack">{this.state.error.message}</Notice>
+        <p className="text-sm text-ink-2">The rest of Shield still works. Reload to try again; if it keeps happening, send this
+          message to support.</p>
+        <Button onClick={() => location.reload()}>Reload</Button>
+      </div>
+    );
+  }
+}
+
+function RoutedPage() {
+  const { pathname } = useLocation();
+  return <PageBoundary key={pathname}><Outlet /></PageBoundary>;
+}
+
 export function Shell() {
   const [open, setOpen] = useState(false);
   const { incidents } = useLive();
@@ -195,7 +219,7 @@ export function Shell() {
           <StatusStrip />
         </div>
         <main className="mx-auto max-w-[1440px] px-5 py-6">
-          <Outlet />
+          <RoutedPage />
         </main>
       </div>
     </div>

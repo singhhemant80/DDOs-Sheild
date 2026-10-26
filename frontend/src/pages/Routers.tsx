@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Check as CheckIcon, CircleAlert, KeyRound, Pencil, Plug, Plus, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Check as CheckIcon, CircleAlert, KeyRound, Pencil, Plug, Plus, Trash2, TriangleAlert } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useApi } from "../lib/hooks";
@@ -135,15 +135,19 @@ export function RouterList() {
               : w ? <Badge tone="warn">{w} warning{w > 1 ? "s" : ""}</Badge> : <Badge tone="ok">All good</Badge>;
           } },
           { key: "v", header: "RouterOS", render: (r) => r.routeros_version ?? <span className="text-ink-3">–</span> },
+          ...(can("config_network") ? [{ key: "x", header: "", align: "right" as const, render: (r: Router) => (
+            <span onClick={(e) => e.stopPropagation()}><Button variant="quiet" aria-label={`Edit ${r.name}`} onClick={() => setEdit(r)}><Pencil size={15} /> Edit</Button></span>) }] : []),
         ]} />
-      {edit && <RouterDialog router={edit === "new" ? null : edit} onClose={() => setEdit(null)}
+      {edit && <RouterDialog router={edit === "new" ? null : edit} onClose={() => setEdit(null)} onDeleted={() => { routers.reload(); states.reload(); }}
         onSaved={(r) => { routers.reload(); if (edit === "new") nav(`/routers/${r.id}`); }} />}
     </Section>
   );
 }
 
 // ---------------------------------------------------------------- add / edit
-function RouterDialog({ router, onClose, onSaved }: { router: Router | null; onClose: () => void; onSaved: (r: Router) => void }) {
+function RouterDialog({ router, onClose, onSaved, onDeleted }:
+  { router: Router | null; onClose: () => void; onSaved: (r: Router) => void; onDeleted?: () => void }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [f, setF] = useState({
     name: router?.name ?? "", model: router?.model ?? "ccr2004", role: router?.role ?? "primary",
     mgmt_address: router?.mgmt_address ?? "", api_port: String(router?.api_port ?? 8729), use_tls: router?.use_tls ?? true,
@@ -168,8 +172,17 @@ function RouterDialog({ router, onClose, onSaved }: { router: Router | null; onC
   };
   return (
     <Dialog open title={router ? `Edit ${router.name}` : "Add router"} onClose={onClose}
-      footer={<><Button variant="quiet" onClick={onClose}>Cancel</Button>
+      footer={<>
+        {router && <Button variant="danger" disabled={busy} className="mr-auto" onClick={async () => {
+          if (!confirmDelete) { setConfirmDelete(true); return; }
+          setErr(null); setBusy(true);
+          try { await api(`/routers/${router.id}`, { method: "DELETE" }); onClose(); onDeleted?.(); }
+          catch (e: any) { setErr(e.message); setConfirmDelete(false); } finally { setBusy(false); }
+        }}><Trash2 size={15} /> {confirmDelete ? "Click again to delete" : "Delete router"}</Button>}
+        <Button variant="quiet" onClick={onClose}>Cancel</Button>
         <Button variant="primary" onClick={save} disabled={busy}>{router ? "Save" : "Add router"}</Button></>}>
+      {confirmDelete && <Notice tone="warn">Deleting removes the router, its status history and Shield's BGP sessions recorded
+        for it. Upstreams linked to it are kept but unlinked. Nothing on the router itself is changed.</Notice>}
       <Notice>Shield only reads from routers in this phase. Give it a RouterOS account in a group with just
         <code className="mx-1">read,api,test</code> and allow it from the Shield server's address only.
         The templates in <code>deploy/mikrotik</code> set this up.</Notice>
@@ -205,6 +218,7 @@ function RouterDialog({ router, onClose, onSaved }: { router: Router | null; onC
 // ---------------------------------------------------------------- detail
 export function RouterDetail() {
   const id = Number(useParams().id);
+  const nav = useNavigate();
   const { can } = useAuth();
   const router = useApi<Router>(`/routers/${id}`, 15_000);
   const state = useApi<RouterState | null>(`/routers/${id}/state`, 10_000);
@@ -267,7 +281,7 @@ export function RouterDetail() {
           <FindingList items={s?.checks ?? []} />
         </Section>
         <Section title="Flow export" flush>
-          {!s?.traffic_flow ? <p className="px-4 py-3 text-sm text-ink-3">Not read yet.</p> : (
+          {!s?.traffic_flow || !Array.isArray(s.traffic_flow.targets) ? <p className="px-4 py-3 text-sm text-ink-3">Not read yet{s && !s.ok ? ": Shield has not been able to connect to this router" : ""}.</p> : (
             <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1.5 px-4 py-3 text-sm">
               <dt className="text-ink-2">Traffic-flow</dt><dd>{s.traffic_flow.enabled ? "Enabled" : <span className="text-attack">Disabled</span>}</dd>
               <dt className="text-ink-2">Interfaces</dt><dd>{s.traffic_flow.interfaces || "all"}</dd>
@@ -323,7 +337,8 @@ export function RouterDetail() {
         <EventTable rows={events.data ?? []} />
       </Section>
 
-      {editing && <RouterDialog router={r} onClose={() => setEditing(false)} onSaved={() => { router.reload(); }} />}
+      {editing && <RouterDialog router={r} onClose={() => setEditing(false)} onSaved={() => { router.reload(); }}
+        onDeleted={() => nav("/routers")} />}
       {test && test !== "busy" && <TestDialog res={test} canPin={can("config_network")} onPin={pin} onClose={() => setTest(null)} />}
       {cert && cert !== "busy" && <CertDialog cert={cert} onPin={pin} onClose={() => setCert(null)} />}
     </div>

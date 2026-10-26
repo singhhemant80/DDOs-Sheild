@@ -39,7 +39,7 @@ Run the install command again. It downloads the newest release, takes a database
 Secrets, users and configuration are kept. To install or go back to a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/singhhemant80/DDOs-Sheild/main/install.sh | sudo SHIELD_VERSION=v0.7.0 bash
+curl -fsSL https://raw.githubusercontent.com/singhhemant80/DDOs-Sheild/main/install.sh | sudo SHIELD_VERSION=v0.7.1 bash
 ```
 
 Going back to an older release does not undo database migrations; restore the pre-upgrade backup
