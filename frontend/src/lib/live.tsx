@@ -13,6 +13,7 @@ export type Incident = {
   customer: { customer_ref: string; customer_name: string | null; service_type: string } | null;
   current: { pps?: number; bps?: number; provenance?: Provenance; signals?: { vector: string; value: number; threshold: number; ratio: number; unit?: string }[] };
   duration_seconds: number;
+  top_asns?: { asn: number; as_name: string | null; share: number | null }[];
 };
 
 type IncidentEvent = {

@@ -40,6 +40,17 @@ type Config struct {
 		StoreMinPPS   float64 `json:"store_min_pps"`
 		StoreRawFlows bool    `json:"store_raw_flows"`
 	} `json:"clickhouse"`
+	// Per-attack sources: the busiest source addresses of each busy or attacked destination,
+	// stored every window_seconds in ClickHouse table src_10s.
+	Sources struct {
+		Enabled       bool    `json:"enabled"`
+		WindowSeconds int     `json:"window_seconds"`
+		Top           int     `json:"top"`
+		MinPPS        float64 `json:"min_pps"` // destinations above this; any rate while under an open incident
+		PerDst        int     `json:"max_per_destination"`
+		Total         int     `json:"max_total"`
+		ASNDB         string  `json:"asn_db"` // iptoasn.com table, refreshed daily by shield-asn-update
+	} `json:"sources"`
 	SpreadThresholdMs int     `json:"spread_threshold_ms"`
 	MaxSpreadSeconds  int     `json:"max_spread_seconds"`
 	MaxDestinations   int     `json:"max_destinations"`
@@ -63,6 +74,13 @@ func Default() *Config {
 	c.ClickHouse.URL = "http://127.0.0.1:8123"
 	c.ClickHouse.Database = "shield"
 	c.ClickHouse.StoreMinPPS = 10
+	c.Sources.Enabled = true
+	c.Sources.WindowSeconds = 10
+	c.Sources.Top = 20
+	c.Sources.MinPPS = 5000
+	c.Sources.PerDst = 2048
+	c.Sources.Total = 1_000_000
+	c.Sources.ASNDB = "/var/lib/crapplet-shield/ip2asn-combined.tsv.gz"
 	c.SpreadThresholdMs = 2000
 	c.MaxSpreadSeconds = 120
 	c.MaxDestinations = 200_000

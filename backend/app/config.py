@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # Snapshots older than this are reported as unavailable rather than shown as current.
     live_stale_seconds: int = 5
     iface_stale_seconds: int = 60
+    # IP-to-ASN database (iptoasn.com ip2asn-combined.tsv.gz, public domain), refreshed weekly by
+    # shield-asn-update.timer. Without it, attack sources show AS numbers only if routers export them.
+    asn_db_path: str = "/var/lib/crapplet-shield/ip2asn-combined.tsv.gz"
+    asn_db_url: str = "https://iptoasn.com/data/ip2asn-combined.tsv.gz"
 
     @field_validator("secret_key")
     @classmethod

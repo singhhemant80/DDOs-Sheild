@@ -5,6 +5,7 @@
   python -m app.cli seed --file ../config/network.example.yaml [--allow-lab-ranges]
   python -m app.cli purge-retention
   python -m app.cli verify-audit
+  python -m app.cli update-asn [--url URL]
 """
 from __future__ import annotations
 
@@ -195,6 +196,17 @@ def verify_audit(_args) -> int:
     return 0 if r.ok else 2
 
 
+def update_asn(args) -> int:
+    from . import asn
+    try:
+        n = asn.update(url=args.url)
+    except Exception as e:  # network, HTTP, bad file: keep the current table
+        print(f"ASN table not updated: {e}", file=sys.stderr)
+        return 1
+    print(f"ASN table updated: {n} ranges")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="shield")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -218,6 +230,9 @@ def main(argv=None) -> int:
     s.set_defaults(fn=seed)
     sub.add_parser("purge-retention").set_defaults(fn=purge_retention)
     sub.add_parser("verify-audit").set_defaults(fn=verify_audit)
+    u = sub.add_parser("update-asn", help="download the IP-to-ASN table used to name attack sources")
+    u.add_argument("--url", help="download from this URL instead of the configured one")
+    u.set_defaults(fn=update_asn)
     args = ap.parse_args(argv)
     return args.fn(args)
 

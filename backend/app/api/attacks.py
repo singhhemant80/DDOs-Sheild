@@ -15,6 +15,7 @@ from sqlalchemy import case, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import CIDR
 from sqlalchemy.orm import Session
 
+from .. import attack_sources as srcs
 from .. import audit
 from .. import netvalidate as nv
 from .. import telemetry as tm
@@ -57,6 +58,7 @@ class IncidentOut(BaseModel):
     customer: dict | None
     current: dict
     duration_seconds: int
+    top_asns: list[dict] = []
 
 
 class TimelineOut(BaseModel):
@@ -118,6 +120,7 @@ def _out(db: Session, inc: AttackIncident, customers: dict, prefixes: dict, user
         last_hot_at=inc.last_hot_at, resolution=inc.resolution, acknowledged_at=inc.acknowledged_at,
         acknowledged_by=users.get(inc.acknowledged_by_id), customer=customers.get(t), current=inc.current or {},
         duration_seconds=max(0, int((end - inc.first_detected_at).total_seconds())),
+        top_asns=srcs.top_asns(inc.sources_summary),
     )
 
 
@@ -229,14 +232,31 @@ def incident_detail(incident_id: uuid.UUID, _: Principal = Depends(require(Perm.
 
 @router.get("/attacks/{incident_id}/series")
 def incident_series(incident_id: uuid.UUID, _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
-    """Traffic to the target from 5 minutes before detection to 2 minutes after the end."""
+    """Traffic to the target from 5 minutes before detection to 2 minutes after the end.
+
+    Per-second data (dst_1s) is kept 30 days; older incidents use the 1-minute rollups (180 days)."""
     inc = _get(db, incident_id)
     start = int(inc.first_detected_at.timestamp()) - 300
     end = int((inc.resolved_at or datetime.now(UTC)).timestamp()) + 120
-    step = max(1, (end - start) // 720)
+    minute = start < time.time() - 29 * 86400
+    step = max(60 if minute else 1, (end - start) // 720)
     params = {"step": step, "since": tm.utc(start), "until": tm.utc(min(end, int(time.time())))}
-    if inc.scope == "host":
+    host = inc.scope == "host"
+    if host:
         params["dst"] = str(ipaddress.ip_network(str(inc.target)).network_address)
+    else:
+        params["prefix"] = str(inc.target)
+    if minute:
+        where = "dst = {dst:String}" if host else "dst IN (SELECT DISTINCT dst FROM dst_1m WHERE prefix = {prefix:String})"
+        sql = f"""SELECT t, avg(p) AS pps, avg(b) AS bps, avg(u) AS udp_pps, avg(s) AS syn_pps FROM (
+                   SELECT toUnixTimestamp(toStartOfInterval(ts, INTERVAL {{step:UInt32}} SECOND)) AS t, ts,
+                          sum(pa) AS p, sum(ba) AS b, sum(ua) AS u, sum(sa) AS s FROM (
+                     SELECT ts, dst, avgMerge(pps_avg) AS pa, avgMerge(bps_avg) AS ba, avgMerge(udp_avg) AS ua,
+                            avgMerge(syn_avg) AS sa
+                     FROM dst_1m WHERE {where} AND ts >= {{since:DateTime('UTC')}} AND ts <= {{until:DateTime('UTC')}}
+                     GROUP BY ts, dst)
+                   GROUP BY t, ts) GROUP BY t ORDER BY t"""
+    elif host:
         sql = """SELECT toUnixTimestamp(toStartOfInterval(ts, INTERVAL {step:UInt32} SECOND)) AS t,
                         avg(pps) AS pps, avg(bps) AS bps, avg(tcp_pps) AS tcp_pps, avg(udp_pps) AS udp_pps,
                         avg(icmp_pps) AS icmp_pps, avg(syn_pps) AS syn_pps, avg(frag_pps) AS frag_pps
@@ -244,7 +264,6 @@ def incident_series(incident_id: uuid.UUID, _: Principal = Depends(require(Perm.
                    AND ts >= {since:DateTime('UTC')} AND ts <= {until:DateTime('UTC')}
                  GROUP BY t ORDER BY t"""
     else:
-        params["prefix"] = str(inc.target)
         sql = """SELECT t, avg(p) AS pps, avg(b) AS bps, avg(u) AS udp_pps, avg(s) AS syn_pps FROM (
                    SELECT toUnixTimestamp(toStartOfInterval(ts, INTERVAL {step:UInt32} SECOND)) AS t, ts,
                           sum(pps) AS p, sum(bps) AS b, sum(udp_pps) AS u, sum(syn_pps) AS s
@@ -255,7 +274,28 @@ def incident_series(incident_id: uuid.UUID, _: Principal = Depends(require(Perm.
         rows = tm.ch_query(sql, params)
     except tm.ClickHouseUnavailable:
         return {"available": False, "reason": "ClickHouse unavailable", "points": []}
-    return {"available": True, "step_seconds": step, "from": start, "to": end, "points": rows}
+    return {"available": True, "step_seconds": step, "from": start, "to": end, "points": rows,
+            "resolution": "1m" if minute else "1s"}
+
+
+@router.get("/attacks/{incident_id}/sources")
+def incident_sources(incident_id: uuid.UUID, _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
+    """Who sent the traffic: top source addresses, their networks (AS) and countries.
+
+    Closed incidents return the summary stored when they closed; open ones are computed live."""
+    inc = _get(db, incident_id)
+    closed = inc.status.value not in OPEN_INCIDENT_STATES
+    if closed and inc.sources_summary:
+        return {**inc.sources_summary, "stored": True}
+    try:
+        out = srcs.summarize(inc)
+    except tm.ClickHouseUnavailable:
+        return {"available": False, "reason": "ClickHouse unavailable", "sources": [], "asns": [], "countries": [],
+                "stored": False}
+    if closed and inc.resolved_at and (datetime.now(UTC) - inc.resolved_at).total_seconds() > 30:
+        inc.sources_summary = out   # keep it beyond the per-source data's 90 days
+        db.commit()
+    return {**out, "stored": False}
 
 
 def _require_open(inc: AttackIncident) -> None:

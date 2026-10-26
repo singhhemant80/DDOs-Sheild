@@ -18,6 +18,7 @@ const (
 	StreamFull   = "shield:traffic:stream"   // XADD full per-destination detail for the detector
 	KeyIfaces    = "shield:ifaces"           // HASH "agent|ifIndex" -> iftrack.Rate JSON
 	KeyCollector = "shield:collector:status" // Status JSON (EX 15)
+	KeyHot       = "shield:detector:hot"     // written by the detector: {"targets":["163.5.191.30/32",...]} (EX 30)
 	HistoryLen   = 3600
 )
 
@@ -150,6 +151,47 @@ func DstRowOf(ts time.Time, d Dst) DstRow {
 		r.Reflect = map[string]float64{}
 	}
 	return r
+}
+
+// SrcRow is one row of shield.src_10s: one source of one destination over one window.
+type SrcRow struct {
+	TS        string  `json:"ts"`
+	Dst       string  `json:"dst"`
+	Prefix    string  `json:"prefix"`
+	Src       string  `json:"src"`
+	SrcAS     uint32  `json:"src_as"`
+	PPS       float64 `json:"pps"`
+	BPS       float64 `json:"bps"`
+	Proto     uint8   `json:"proto"`
+	SrcPort   uint16  `json:"src_port"`
+	DstPort   uint16  `json:"dst_port"`
+	DstPPS    float64 `json:"dst_pps"`
+	Sources   uint32  `json:"sources"`
+	Untracked float64 `json:"untracked_pps"`
+}
+
+func SrcRowOf(r agg.SourceRow) SrcRow {
+	return SrcRow{TS: chTime(r.WindowStart), Dst: r.Dst.String(), Prefix: r.Prefix.String(), Src: r.Src.String(),
+		SrcAS: r.SrcAS, PPS: r.PPS, BPS: r.BPS, Proto: r.Proto, SrcPort: r.SrcPort, DstPort: r.DstPort,
+		DstPPS: r.DstPPS, Sources: uint32(r.Sources), Untracked: r.Untracked}
+}
+
+// NetRow is one row of shield.asn_10s: one source network (origin AS) of one destination.
+type NetRow struct {
+	TS      string  `json:"ts"`
+	Dst     string  `json:"dst"`
+	Prefix  string  `json:"prefix"`
+	ASN     uint32  `json:"asn"`
+	Country string  `json:"country"`
+	PPS     float64 `json:"pps"`
+	BPS     float64 `json:"bps"`
+	Sources uint32  `json:"sources"`
+	DstPPS  float64 `json:"dst_pps"`
+}
+
+func NetRowOf(r agg.NetRow) NetRow {
+	return NetRow{TS: chTime(r.WindowStart), Dst: r.Dst.String(), Prefix: r.Prefix.String(), ASN: r.ASN,
+		Country: r.Country, PPS: r.PPS, BPS: r.BPS, Sources: uint32(r.Sources), DstPPS: r.DstPPS}
 }
 
 type TotalsRow struct {

@@ -94,6 +94,10 @@ def checklist(db: Session) -> list[dict]:
     add("flows", "Flow data arriving from the routers", receiving,
         "Export NetFlow/IPFIX on the upstream interfaces to this server (port 2055/4739).", "/health", 3)
 
+    from . import asn
+    add("asn", "IP-to-ASN table installed (names attack sources)", asn.status().get("loaded"),
+        "Run: sudo systemctl start shield-asn-update (needs internet access to iptoasn.com).", "/history", 3)
+
     polled = db.scalar(select(func.count()).select_from(RouterState).join(Router, Router.id == RouterState.router_id)
                        .where(Router.enabled.is_(True), RouterState.ok.is_(True))) or 0
     add("router", "MikroTik router connected (read-only)", polled,

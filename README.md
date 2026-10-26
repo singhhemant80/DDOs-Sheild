@@ -11,6 +11,8 @@ RouterOS v7 integration, multi-upstream steering, and an operator dashboard.
 > mitigation**: production sessions behind an MFA-protected switch, a canary acceptance run per peer,
 > a safety interlock and one-click rollback. The dashboard's **Roadmap** page shows what is done,
 > next and pending, and what is still to set up on your installation.
+> Attack history keeps every incident with the source addresses, networks (AS) and countries the
+> traffic came from ([docs/attack-sources.md](docs/attack-sources.md)).
 > See [docs/roadmap.md](docs/roadmap.md), [docs/production.md](docs/production.md) and [docs/bgp.md](docs/bgp.md).
 
 ## Install

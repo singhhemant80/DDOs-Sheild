@@ -170,6 +170,13 @@ type Config struct {
 	SpreadThreshold time.Duration
 	MaxSpread       time.Duration
 	MaxDsts         int // memory bound on tracked destinations
+	SourcesPerDst   int // memory bound on sources tracked per destination per window
+	SourcesTotal    int // memory bound on sources tracked in total per window
+	// ASNLookup maps a source to its origin AS and country (asndb); nil = unknown.
+	ASNLookup func(netip.Addr) (uint32, string)
+	// UnknownASN and OtherASN are the AS numbers reported for "not in the table" and for the
+	// networks beyond the per-window limit (asndb.Unknown / asndb.Other).
+	UnknownASN, OtherASN uint32
 }
 
 type Aggregator struct {
@@ -179,6 +186,7 @@ type Aggregator struct {
 	in, out  Counters
 	unmatch  Counters
 	Dropped  uint64 // destinations not tracked because MaxDsts was hit
+	sources  *sourceTracker
 }
 
 func New(cfg Config, prefixes *prefix.Holder) *Aggregator {
@@ -191,7 +199,8 @@ func New(cfg Config, prefixes *prefix.Holder) *Aggregator {
 	if cfg.MaxDsts == 0 {
 		cfg.MaxDsts = 200_000
 	}
-	return &Aggregator{cfg: cfg, prefixes: prefixes, dsts: map[netip.Addr]*dstState{}}
+	return &Aggregator{cfg: cfg, prefixes: prefixes, dsts: map[netip.Addr]*dstState{},
+		sources: newSourceTracker(cfg)}
 }
 
 // Add accounts one record. Not safe for concurrent use: call from the aggregator goroutine.
@@ -210,6 +219,7 @@ func (a *Aggregator) Add(r *flow.Record) {
 			a.dsts[r.Dst] = st
 		}
 		st.cur.sources.add(r.Src)
+		a.sources.add(r.Dst, p, r.Src, r.SrcAS, &c, r.Proto, r.SrcPort, r.DstPort)
 		dur := time.Duration(r.DurationMs) * time.Millisecond
 		if dur > a.cfg.SpreadThreshold {
 			n := int(min(dur, a.cfg.MaxSpread) / time.Second)
@@ -268,6 +278,14 @@ func (a *Aggregator) Tick(ts time.Time) Second {
 	a.in.FlowRecords = 0
 	sort.Slice(s.Dsts, func(i, j int) bool { return s.Dsts[i].C.Packets > s.Dsts[j].C.Packets })
 	return s
+}
+
+// Sources closes the source-tracking window ending at `end` and returns the busiest `topN`
+// sources of each destination that averaged at least minPPS over the window, or for which
+// hot(dst) is true.
+func (a *Aggregator) Sources(end time.Time, minPPS float64, topN int, hot func(netip.Addr) bool) ([]SourceRow, []NetRow) {
+	rows := a.sources.flush(end, minPPS, topN, hot)
+	return rows, append([]NetRow(nil), a.sources.nets...)
 }
 
 func prov(c *Counters) string {

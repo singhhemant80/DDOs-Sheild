@@ -23,6 +23,7 @@ const (
 	ieTCPFlags        = 6
 	ieSrcPort         = 7
 	ieSrcIPv4         = 8
+	ieSrcAS           = 16
 	ieDstPort         = 11
 	ieDstIPv4         = 12
 	ieLastSwitched    = 21
@@ -366,6 +367,8 @@ func (d *Decoder) parseData(dk domainKey, id uint16, b []byte, h hdrInfo, out []
 				r.DstPort = uint16(uintN(v))
 			case ieSrcIPv4, ieSrcIPv6:
 				r.Src = addr(v)
+			case ieSrcAS:
+				r.SrcAS = uint32(uintN(v))
 			case ieDstIPv4, ieDstIPv6:
 				r.Dst = addr(v)
 			case ieFirstSwitched:

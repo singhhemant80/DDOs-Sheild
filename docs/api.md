@@ -42,7 +42,7 @@ disabling a user revokes sessions immediately.
 | Roadmap | `GET /system/roadmap` (phases done / next / pending and this installation's open go-live steps) | read-only |
 | Traffic | `GET /traffic/live`, `/traffic/history`, `/traffic/totals`, `/traffic/top`, `/traffic/destinations/{ip}`, `/traffic/interfaces`, `/collector/status` | read-only |
 | Live stream | WebSocket `/ws/traffic` (traffic every second + incident events) | read-only |
-| Attacks | `GET /attacks?state=open\|closed\|all&severity=&q=&confirmed_only=`, `/attacks/summary`, `/attacks/{id}`, `/attacks/{id}/series` | read-only |
+| Attacks | `GET /attacks?state=open\|closed\|all&severity=&q=&confirmed_only=`, `/attacks/summary`, `/attacks/{id}`, `/attacks/{id}/series`, `/attacks/{id}/sources` (top source addresses, networks (AS) and countries; `since=` filters the list) | read-only |
 | Attack actions | `POST /attacks/{id}/acknowledge`, `/attacks/{id}/false-positive` (`{"note": "..."}`), `/attacks/{id}/notes` | NOC operator |
 | Mitigation | `POST /mitigation/preview`, `POST /mitigation/actions` (header `Idempotency-Key` required), `GET /mitigation/actions?state=live\|proposed\|active\|closed\|all&incident_id=`, `GET /mitigation/actions/{id}`, `POST …/{id}/approve`, `…/reject` and `…/withdraw?whole_group=` (`{"reason": "..."}`), `…/extend` (`{"minutes": 60}`), `GET /mitigation/routes`, `GET /mitigation/status` | NOC operator |
 | Mitigation policies | `GET/POST /mitigation/policies`, `PUT/DELETE /mitigation/policies/{id}` | Network engineer |

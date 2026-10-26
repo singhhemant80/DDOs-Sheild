@@ -551,6 +551,9 @@ class AttackIncident(TimestampMixin, Base):
     current: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict)
     confidence_breakdown: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"),
                                                        default=dict)
+    # Who sent the traffic: top sources, networks (AS) and countries, stored when the incident
+    # closes so it outlives the per-source flow data (90 days).
+    sources_summary: Mapped[dict | None] = mapped_column(JSONB)
 
     __table_args__ = (
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_incident_confidence"),

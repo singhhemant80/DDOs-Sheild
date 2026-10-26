@@ -121,3 +121,20 @@ func TestTruncatedAndGarbageInputNeverPanics(t *testing.T) {
 	junk[1] = 9
 	_, _ = d.Decode(exp, junk, nil)
 }
+
+func TestV9SourceAS(t *testing.T) {
+	// template 256: src4 dst4 pkts(4) src_as(4)
+	h := strings.Join([]string{
+		"0009 0002 00000064 6b49d200 00000001 00000000",
+		"0000 0018 0100 0004 0008 0004 000c 0004 0002 0004 0010 0004",
+		"0100 0014 c6336407 a305bf14 00000005 0000d6d8",
+	}, "")
+	b, err := hex.DecodeString(strings.ReplaceAll(h, " ", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, err := NewDecoder().Decode(exp, b, nil)
+	if err != nil || len(recs) != 1 || recs[0].SrcAS != 55000 {
+		t.Fatalf("recs=%+v err=%v", recs, err)
+	}
+}

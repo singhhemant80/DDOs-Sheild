@@ -159,7 +159,7 @@ def test_websocket_streams_published_snapshots(client):
 
 
 # ---------------------------------------------------------------- ClickHouse
-SCHEMA = pathlib.Path(__file__).resolve().parents[2] / "collector" / "clickhouse" / "001_schema.sql"
+SCHEMAS = sorted((pathlib.Path(__file__).resolve().parents[2] / "collector" / "clickhouse").glob("[0-9][0-9][0-9]_*.sql"))
 
 
 def ch(sql: str):
@@ -170,7 +170,7 @@ def ch(sql: str):
 @pytest.fixture
 def ch_db():
     ch("DROP DATABASE IF EXISTS shield_test SYNC")
-    sql = "\n".join(l for l in SCHEMA.read_text().splitlines() if not l.strip().startswith("--"))
+    sql = "\n".join(l for f in SCHEMAS for l in f.read_text().splitlines() if not l.strip().startswith("--"))
     sql = sql.replace("shield.", "shield_test.").replace("DATABASE IF NOT EXISTS shield;",
                                                           "DATABASE IF NOT EXISTS shield_test;")
     for stmt in sql.split(";"):

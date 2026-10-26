@@ -201,7 +201,9 @@ systemctl enable clickhouse-server >/dev/null 2>&1
 systemctl start clickhouse-server
 for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:8123/ping >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS http://127.0.0.1:8123/ping >/dev/null || die "ClickHouse did not start (journalctl -u clickhouse-server)"
-clickhouse-client --multiquery < "$PREFIX/clickhouse/001_schema.sql"
+for f in "$PREFIX"/clickhouse/[0-9][0-9][0-9]_*.sql; do
+  clickhouse-client --multiquery < "$f" || die "ClickHouse schema $(basename "$f") failed"
+done
 # Shield's ClickHouse login, from the stored password, on every run: an earlier run that stopped
 # before this step (or a reinstalled ClickHouse) is repaired.
 CH_PW=$(sed -n 's/^SHIELD_CLICKHOUSE_PASSWORD=//p' "$ETC/collector.env")
@@ -244,9 +246,18 @@ sysctl -q --system >/dev/null 2>&1 || true
 install -m 0644 "$PREFIX"/deploy/systemd/*.service "$PREFIX"/deploy/systemd/*.timer /etc/systemd/system/
 install -d -o postgres -g postgres -m 0700 /var/backups/crapplet-shield
 systemctl daemon-reload
-systemctl enable shield-api.service shield-detector.service shield-mikrotik.service shield-mitigator.service shield-maintenance.timer shield-backup.timer >/dev/null 2>&1
+install -d -o shield -g shield -m 0755 /var/lib/crapplet-shield
+systemctl enable shield-api.service shield-detector.service shield-mikrotik.service shield-mitigator.service shield-maintenance.timer shield-backup.timer shield-asn-update.timer >/dev/null 2>&1
 systemctl restart shield-api.service shield-detector.service shield-mikrotik.service shield-mitigator.service
-systemctl start shield-maintenance.timer shield-backup.timer
+systemctl start shield-maintenance.timer shield-backup.timer shield-asn-update.timer
+# IP-to-ASN table for naming attack sources (refreshed daily by the timer). Not fatal if offline.
+if [ ! -s /var/lib/crapplet-shield/ip2asn-combined.tsv.gz ]; then
+  if timeout 300 systemctl start shield-asn-update.service; then
+    note "IP-to-ASN table downloaded"
+  else
+    note "could not download the IP-to-ASN table now (retried daily); attack sources show addresses without AS names until then"
+  fi
+fi
 for f in collector snmp-poller; do
   if [ -f "$ETC/$f.json" ]; then
     systemctl enable "shield-$f.service" >/dev/null 2>&1

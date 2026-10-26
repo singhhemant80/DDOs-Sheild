@@ -18,7 +18,7 @@ import logging
 import signal
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import redis
@@ -41,6 +41,7 @@ log = logging.getLogger("shield.detector")
 STREAM = "shield:traffic:stream"
 CHAN_EVENTS = "shield:events"
 KEY_STATUS = "shield:detector:status"
+KEY_HOT = "shield:detector:hot"
 DATA_GAP_SECONDS = 5
 EVIDENCE_EVERY = 10
 EVIDENCE_EVERY_LATE = 60
@@ -104,7 +105,7 @@ class DetectorService:
         self.processed = 0
         self.started = time.time()
         self.stream_id = "$"
-        self._housekeeping = {"profiles": 0.0, "external": 0.0, "baselines": time.time(), "status": 0.0}
+        self._housekeeping = {"profiles": 0.0, "external": 0.0, "baselines": time.time(), "status": 0.0, "sources": 0.0}
         self._restore()
 
     # ------------------------------------------------------------ startup
@@ -174,6 +175,8 @@ class DetectorService:
             self._persist_baselines(); last["baselines"] = now
         if now - last["status"] > 5:
             self._publish_status(); last["status"] = now
+        if now - last["sources"] > 60:
+            self._store_sources(); last["sources"] = now
         return n
 
     def process(self, snap: dict) -> list[Event]:
@@ -319,6 +322,8 @@ class DetectorService:
               "lag_seconds": round(time.time() - self.last_snapshot_ts, 1) if self.last_snapshot_ts else None}
         try:
             self.rds.set(KEY_STATUS, json.dumps(st), ex=15)
+            # The collector stores the sources of these targets at any rate (attack history).
+            self.rds.set(KEY_HOT, json.dumps({"targets": sorted(self.incidents)}), ex=30)
         except redis.RedisError:
             pass
 
@@ -355,6 +360,30 @@ class DetectorService:
                 self.incidents.pop(key, None)
                 log.info("incident %s for %s closed by an operator (%s)", iid, key, closed[iid])
 
+    def _store_sources(self, limit: int = 10) -> int:
+        """Store the source summary (top IPs, AS, countries) of recently closed incidents, so attack
+        history keeps it after the per-source flow data expires."""
+        from .. import attack_sources
+        now = datetime.now(UTC)
+        n = 0
+        with self.sf() as db:
+            rows = db.execute(select(AttackIncident).where(
+                AttackIncident.status.notin_(OPEN_INCIDENT_STATES), AttackIncident.sources_summary.is_(None),
+                AttackIncident.resolved_at <= now - timedelta(seconds=30),
+                AttackIncident.resolved_at >= now - timedelta(days=85)).order_by(AttackIncident.resolved_at.desc())
+                .limit(limit)).scalars().all()
+            for inc in rows:
+                try:
+                    inc.sources_summary = attack_sources.summarize(inc)
+                    n += 1
+                except tm.ClickHouseUnavailable:
+                    break
+                except Exception:
+                    log.exception("source summary failed for incident %s", inc.id)
+                    inc.sources_summary = {"available": False, "error": "summary failed"}
+            db.commit()
+        return n
+
     def _persist_baselines(self) -> None:
         rows = self.engine.baselines.take_dirty()
         if rows:
@@ -387,6 +416,7 @@ def rebuild_baselines(days: int = 28) -> int:
 def main(argv=None) -> int:
     import argparse
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     ap = argparse.ArgumentParser(prog="shield-detector")
     sub = ap.add_subparsers(dest="cmd")
     rb = sub.add_parser("rebuild-baselines", help="seed baselines from ClickHouse history")

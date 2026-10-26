@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"shield/collector/internal/agg"
+	"shield/collector/internal/asndb"
 	"shield/collector/internal/chsink"
 	"shield/collector/internal/config"
 	"shield/collector/internal/flow"
@@ -32,7 +33,7 @@ import (
 	"shield/collector/internal/sflow"
 )
 
-const version = "0.4.0"
+const version = "0.8.2"
 
 type exporterStats struct {
 	kind             atomic.Value
@@ -54,6 +55,8 @@ type app struct {
 	log       *slog.Logger
 	reg       *metrics.Registry
 	prefixes  prefix.Holder
+	hot       prefix.Holder // targets of open incidents (from the detector): their sources are always stored
+	asns      asndb.Holder  // source address -> origin AS, for per-network attack totals
 	prefixSrc atomic.Value
 	nf        *netflow.Decoder
 	recCh     chan []flow.Record
@@ -110,6 +113,7 @@ func newApp(cfg *config.Config, log *slog.Logger) *app {
 		published:  reg.Counter("shield_collector_published_seconds_total", "Seconds published to Redis"),
 	}
 	a.prefixes.Store(prefix.New(cfg.Prefixes()))
+	a.hot.Store(prefix.New(nil))
 	a.prefixSrc.Store("static")
 	if cfg.ClickHouse.Enabled {
 		a.ch = chsink.New(chsink.Config{URL: cfg.ClickHouse.URL, Database: cfg.ClickHouse.Database,
@@ -155,6 +159,7 @@ func (a *app) run(ctx context.Context) error {
 		go func() { defer wg.Done(); a.ch.Run(ctx) }()
 	}
 	go a.refreshPrefixes(ctx)
+	go a.refreshASNs(ctx)
 	go a.serveMetrics()
 	a.aggregate(ctx) // blocks until ctx done
 	wg.Wait()
@@ -259,6 +264,11 @@ func (a *app) aggregate(ctx context.Context) {
 		SpreadThreshold: time.Duration(a.cfg.SpreadThresholdMs) * time.Millisecond,
 		MaxSpread:       time.Duration(a.cfg.MaxSpreadSeconds) * time.Second,
 		MaxDsts:         a.cfg.MaxDestinations,
+		SourcesPerDst:   a.cfg.Sources.PerDst,
+		SourcesTotal:    a.cfg.Sources.Total,
+		ASNLookup:       func(ip netip.Addr) (uint32, string) { return a.asns.Load().Lookup(ip) },
+		UnknownASN:      asndb.Unknown,
+		OtherASN:        asndb.Other,
 	}, &a.prefixes)
 	pubCh := make(chan agg.Second, 4)
 	go a.publisher(ctx, pubCh)
@@ -267,6 +277,13 @@ func (a *app) aggregate(ctx context.Context) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	defer close(pubCh)
+	srcEvery := time.Duration(max(a.cfg.Sources.WindowSeconds, 1)) * time.Second
+	srcTick := time.NewTicker(srcEvery)
+	defer srcTick.Stop()
+	if a.ch == nil || !a.cfg.Sources.Enabled {
+		srcTick.Stop()
+	}
+	hot := func(ip netip.Addr) bool { _, ok := a.hot.Load().Lookup(ip); return ok }
 	for {
 		select {
 		case <-ctx.Done():
@@ -287,6 +304,14 @@ func (a *app) aggregate(ctx context.Context) {
 				if r, ok := a.ift.Update(c, now, "sflow", ""); ok {
 					a.publishIface(r)
 				}
+			}
+		case t := <-srcTick.C:
+			rows, nets := ag.Sources(t, a.cfg.Sources.MinPPS, a.cfg.Sources.Top, hot)
+			for _, r := range rows {
+				a.ch.Add("src_10s", output.SrcRowOf(r))
+			}
+			for _, r := range nets {
+				a.ch.Add("asn_10s", output.NetRowOf(r))
 			}
 		case t := <-tick.C:
 			// The bucket being closed is the second that just ended.
@@ -363,7 +388,7 @@ func rawRow(t time.Time, r flow.Record) output.RawRow {
 // from the config file are always included. If Redis is unreachable the last list is kept.
 func (a *app) refreshPrefixes(ctx context.Context) {
 	static := a.cfg.Prefixes()
-	t := time.NewTicker(10 * time.Second)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	lastLen := -1
 	for {
@@ -397,12 +422,65 @@ func (a *app) refreshPrefixes(ctx context.Context) {
 		default:
 			a.log.Warn("redis unavailable; keeping current prefix list", "err", err)
 		}
+		a.refreshHot()
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
 	}
+}
+
+// refreshASNs (re)loads the IP-to-ASN table when its file changes. Without it, per-network
+// totals are reported under asndb.Unknown (unless the router exports source AS numbers).
+func (a *app) refreshASNs(ctx context.Context) {
+	path := a.cfg.Sources.ASNDB
+	if path == "" || !a.cfg.Sources.Enabled {
+		return
+	}
+	t := time.NewTicker(10 * time.Minute)
+	defer t.Stop()
+	warned := false
+	for {
+		loaded, err := a.asns.Refresh(path)
+		switch {
+		case loaded:
+			a.log.Info("IP-to-ASN table loaded", "ranges", a.asns.Load().Len(), "path", path)
+		case err != nil && !warned:
+			a.log.Warn("no IP-to-ASN table yet; attack sources are not grouped by network", "path", path, "err", err)
+			warned = true
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// refreshHot loads the targets of open incidents published by the detector. Missing or expired
+// key: no hot targets (sources are then stored only above sources.min_pps).
+func (a *app) refreshHot() {
+	raw, err := a.rds.Get(output.KeyHot)
+	if err != nil {
+		if errors.Is(err, redisx.Nil) {
+			a.hot.Store(prefix.New(nil))
+		}
+		return
+	}
+	var doc struct {
+		Targets []string `json:"targets"`
+	}
+	if json.Unmarshal([]byte(raw), &doc) != nil {
+		return
+	}
+	ps := make([]netip.Prefix, 0, len(doc.Targets))
+	for _, s := range doc.Targets {
+		if p, err := netip.ParsePrefix(s); err == nil {
+			ps = append(ps, p.Masked())
+		}
+	}
+	a.hot.Store(prefix.New(ps))
 }
 
 func (a *app) status() output.Status {

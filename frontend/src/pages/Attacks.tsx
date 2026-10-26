@@ -116,7 +116,10 @@ export function AttackHistory() {
   const [q, setQ] = useState("");
   const [confirmedOnly, setConfirmedOnly] = useState(true);
   const [before, setBefore] = useState<string | null>(null);
+  const [days, setDays] = useState("30");
+  const since = useMemo(() => days ? new Date(Date.now() - Number(days) * 86400_000).toISOString() : null, [days]);
   const params = new URLSearchParams({ state, limit: "100" });
+  if (since) params.set("since", since);
   if (sev) params.set("severity", sev);
   if (q.trim()) params.set("q", q.trim());
   if (confirmedOnly) params.set("confirmed_only", "true");
@@ -125,7 +128,7 @@ export function AttackHistory() {
   const reset = () => setBefore(null);
   return (
     <div className="space-y-5">
-      <PageHeader title="Attack history" description="Every incident, newest first. Select one for its timeline and evidence." />
+      <PageHeader title="Attack history" description="Every incident, newest first; incidents are kept indefinitely. Select one for its timeline, evidence and the addresses and networks the traffic came from." />
       <div className="flex flex-wrap items-center gap-2">
         <Input aria-label="Search by address or prefix" placeholder="Address or prefix" value={q}
           onChange={(e) => { setQ(e.target.value); reset(); }} className="max-w-xs" />
@@ -133,6 +136,8 @@ export function AttackHistory() {
           options={[["all", "Open and closed"], ["closed", "Closed only"], ["open", "Open only"]]} />
         <Select aria-label="Severity" value={sev} onChange={(v) => { setSev(v); reset(); }}
           options={[["", "Any severity"], ["critical", "Critical"], ["high", "High"], ["medium", "Medium"], ["low", "Low"]]} />
+        <Select aria-label="Period" value={days} onChange={(v) => { setDays(v); reset(); }}
+          options={[["1", "Last 24 hours"], ["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["365", "Last year"], ["", "All time"]]} />
         <label className="ml-2 flex items-center gap-2 text-sm">
           <input type="checkbox" className="size-4 accent-[var(--signal)]" checked={confirmedOnly}
             onChange={(e) => { setConfirmedOnly(e.target.checked); reset(); }} />
@@ -150,6 +155,11 @@ export function AttackHistory() {
             { key: "s", header: "Severity", render: (i) => <Lamp tone={SEVERITY_TONE[i.severity]} label={i.severity} /> },
             { key: "p", header: "Peak", align: "right", render: (i) => <><div>{pps(i.peak_pps)}</div><div className="text-xs text-ink-3">{bps(i.peak_bps)}</div></> },
             { key: "d", header: "Lasted", render: (i) => duration(i.duration_seconds) },
+            { key: "a", header: "Main source networks", render: (i) => i.top_asns?.length
+                ? <div className="space-y-0.5 text-[13px]">{i.top_asns.slice(0, 2).map((a) => (
+                    <div key={a.asn} className="truncate" title={a.as_name ?? ""}>AS{a.asn} <span className="text-ink-2">{shortName(a.as_name)}</span>
+                      {a.share != null && <span className="text-ink-3"> {Math.round(a.share * 100)}%</span>}</div>))}</div>
+                : <span className="text-ink-3">–</span> },
             { key: "o", header: "Outcome", render: (i) => <StatusPill i={i} /> },
           ]} />
         {list.data && list.data.length === 100 && (
@@ -170,7 +180,7 @@ type Detail = Incident & {
   evidence: { observed_at: string; metric: string; value: number; threshold: number | null; provenance: string; details?: { unit?: string } }[];
   eligibility: { protected_prefix: string | null; rtbh_allowed: boolean; steering_allowed: boolean; filtering_allowed: boolean; reasons: string[] } | null;
 };
-type Series = { available: boolean; reason?: string; step_seconds: number; from: number; to: number;
+type Series = { available: boolean; reason?: string; step_seconds: number; from: number; to: number; resolution?: "1s" | "1m";
   points: { t: number; pps: number; bps: number; udp_pps?: number; syn_pps?: number; tcp_pps?: number; icmp_pps?: number }[] };
 
 const EVENT_WORD: Record<string, string> = {
@@ -188,6 +198,99 @@ const FACTORS: [string, string, string][] = [
   ["persistence", "How steady it has been", "Share of the last confirmation window that was over threshold."],
   ["baseline", "How unusual for this time", "Compared with this address's learned normal for this hour of the week."],
 ];
+
+type SrcRow = { ip: string; asn: number | null; as_name: string | null; country: string; packets: number; bytes: number;
+  peak_pps: number; peak_bps: number; proto: string; src_port: number; dst_port: number; share: number | null };
+type Sources = { available: boolean; reason?: string; stored?: boolean; total_packets?: number; listed_share?: number | null;
+  distinct_sources?: number; max_sources_per_window?: number; asn_db?: { loaded: boolean; updated_at?: string };
+  networks_cover_all?: boolean;
+  sources: SrcRow[]; asns: { asn: number | null; as_name: string | null; country: string; packets: number; bytes: number; sources: number; share: number | null }[];
+  countries: { country: string; packets: number; sources: number; share: number | null }[] };
+
+function shortName(n: string | null | undefined) {
+  if (!n) return "";
+  const s = n.split(/[,]/)[0].trim();
+  return s.length > 34 ? s.slice(0, 32) + "…" : s;
+}
+const share = (v: number | null | undefined) => v == null ? "–" : `${(v * 100).toFixed(v < 0.01 ? 1 : 0)}%`;
+const flag = (cc: string) => cc && /^[A-Z]{2}$/.test(cc)
+  ? String.fromCodePoint(...[...cc].map((c) => 0x1f1a5 + c.charCodeAt(0))) : "";
+
+function AttackSources({ id, vectors, open }: { id: string; vectors: string[]; open: boolean }) {
+  const s = useApi<Sources>(`/attacks/${id}/sources`, open ? 20_000 : 0);
+  const [all, setAll] = useState(false);
+  const d = s.data;
+  const reflection = vectors.some((v) => v.endsWith("_amplification"));
+  const spoofable = vectors.some((v) => ["syn_flood", "udp_flood", "ack_flood", "rst_flood", "icmp_flood", "fragment_flood", "volumetric_pps"].includes(v));
+  const csv = () => {
+    if (!d) return;
+    const head = "ip,asn,as_name,country,packets,bytes,peak_pps,protocol,src_port,dst_port,share\n";
+    const body = d.sources.map((r) => [r.ip, r.asn ?? "", `"${(r.as_name ?? "").replace(/"/g, "'")}"`, r.country, r.packets, r.bytes,
+      r.peak_pps, r.proto, r.src_port, r.dst_port, r.share ?? ""].join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([head + body], { type: "text/csv" }));
+    a.download = `attack-${id}-sources.csv`;
+    a.click();
+  };
+  return (
+    <Section title="Where the traffic came from" aside={d?.available ? <Button variant="quiet" onClick={csv}>Download CSV</Button> : undefined}>
+      {!d ? <p className="text-sm text-ink-2">Loading…</p>
+        : !d.available ? <Notice>{d.reason ? `Source data unavailable (${d.reason}).`
+            : "No source data was recorded for this incident. Shield records sources from version 0.8.2 on, for addresses under attack or above 5,000 packets/s, while flow data is arriving."}</Notice>
+        : <div className="space-y-4">
+          <p className="text-sm text-ink-2">
+            {d.networks_cover_all
+              ? <>Networks and countries count <strong>all</strong> the traffic to the target, from up to {d.max_sources_per_window?.toLocaleString()} sources
+                  at once. The address list shows the busiest 20 per 10 seconds ({d.distinct_sources?.toLocaleString()} addresses,
+                  {" "}{share(d.listed_share)} of the traffic).</>
+              : <>{d.distinct_sources?.toLocaleString()} source addresses recorded, covering {share(d.listed_share)} of the traffic; networks
+                  are worked out from those addresses only.</>}
+            {d.stored && " Saved when the incident closed."}
+          </p>
+          {reflection && <Notice tone="signal">Reflection attack: these addresses are the servers (DNS, NTP, …) that were abused to
+            reflect traffic at you, not the attacker. They are usually real, so their networks can be contacted or filtered.</Notice>}
+          {!reflection && spoofable && <Notice tone="warn">Floods like this can use forged source addresses, so the addresses and networks
+            below may not be the real senders.</Notice>}
+          {d.asn_db && !d.asn_db.loaded && <Notice tone="warn">The IP-to-ASN table is not installed yet, so network names are missing.
+            On the server run <code>sudo systemctl start shield-asn-update</code>.</Notice>}
+          <div className="grid gap-5 xl:grid-cols-[1.3fr_1fr]">
+            <div>
+              <div className="mb-1.5 text-sm font-medium">Networks (AS)</div>
+              <Table dense rows={d.asns} rowKey={(a) => String(a.asn)} empty="–" cols={[
+                { key: "a", header: "AS", render: (a) => a.asn == null ? <span className="text-ink-3">Unknown</span>
+                    : <a className="text-signal hover:underline" href={`https://bgp.tools/as/${a.asn}`} target="_blank" rel="noreferrer">AS{a.asn}</a> },
+                { key: "n", header: "Name", render: (a) => <span title={a.as_name ?? ""}>{flag(a.country)} {shortName(a.as_name)}</span> },
+                { key: "s", header: d.networks_cover_all ? "Sources at once" : "Sources", align: "right", render: (a) => a.sources.toLocaleString() },
+                { key: "p", header: "Packets", align: "right", render: (a) => count(a.packets) },
+                { key: "h", header: "Share", align: "right", render: (a) => share(a.share) },
+              ]} />
+            </div>
+            <div>
+              <div className="mb-1.5 text-sm font-medium">Countries</div>
+              <Table dense rows={d.countries} rowKey={(c) => c.country} empty="–" cols={[
+                { key: "c", header: "Country", render: (c) => <>{flag(c.country)} {c.country}</> },
+                { key: "s", header: "Sources", align: "right", render: (c) => c.sources.toLocaleString() },
+                { key: "h", header: "Share", align: "right", render: (c) => share(c.share) },
+              ]} />
+            </div>
+          </div>
+          <div>
+            <div className="mb-1.5 text-sm font-medium">Source addresses</div>
+            <Table dense rows={all ? d.sources : d.sources.slice(0, 20)} rowKey={(r) => r.ip} cols={[
+              { key: "i", header: "Address", render: (r) => <span className="font-mono text-[13px]">{r.ip}</span> },
+              { key: "a", header: "Network", render: (r) => r.asn == null ? <span className="text-ink-3">–</span>
+                  : <span title={r.as_name ?? ""}>AS{r.asn} <span className="text-ink-2">{shortName(r.as_name)}</span></span> },
+              { key: "c", header: "Country", render: (r) => <>{flag(r.country)} {r.country}</> },
+              { key: "t", header: "Traffic", render: (r) => <span className="text-ink-2">{r.proto} {r.src_port ? `from port ${r.src_port}` : ""}{r.dst_port ? ` to port ${r.dst_port}` : ""}</span> },
+              { key: "p", header: "Peak", align: "right", render: (r) => <><div>{pps(r.peak_pps)}</div><div className="text-xs text-ink-3">{bps(r.peak_bps)}</div></> },
+              { key: "h", header: "Share", align: "right", render: (r) => share(r.share) },
+            ]} />
+            {d.sources.length > 20 && <Button variant="quiet" onClick={() => setAll(!all)}>{all ? "Show the top 20" : `Show all ${d.sources.length}`}</Button>}
+          </div>
+        </div>}
+    </Section>
+  );
+}
 
 export function AttackDetail() {
   const { id } = useParams();
@@ -247,7 +350,8 @@ export function AttackDetail() {
       <ErrorLine error={err} />
       {inc.acknowledged_at && <p className="text-sm text-ink-2">Acknowledged by {inc.acknowledged_by} at {dateTime(inc.acknowledged_at)}.</p>}
 
-      <Section title="Traffic to the target" aside={series.data?.available === false ? undefined : "From 5 minutes before detection"}>
+      <Section title="Traffic to the target" aside={series.data?.available === false ? undefined
+        : series.data?.resolution === "1m" ? "1-minute averages (per-second data is kept 30 days)" : "From 5 minutes before detection"}>
         {series.data?.available === false
           ? <Notice tone="warn">Stored traffic history is unavailable ({series.data.reason}).</Notice>
           : <LiveChart ts={pts.map((p) => p.t)} gapSec={(series.data?.step_seconds ?? 1) * 3} markers={markers}
@@ -302,6 +406,8 @@ export function AttackDetail() {
           {b.baseline_known === false && <p className="mt-3 text-xs text-ink-3">No learned baseline yet for this address at this hour, so a neutral value was used.</p>}
         </Section>
       </div>
+
+      <AttackSources id={inc.id} vectors={inc.vectors} open={!!open} />
 
       <div className="grid gap-5 xl:grid-cols-[1.4fr_1fr]">
         <Section title="Timeline" flush>

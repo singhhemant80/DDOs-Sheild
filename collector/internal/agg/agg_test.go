@@ -130,3 +130,64 @@ func TestPrefixMostSpecific(t *testing.T) {
 		t.Fatal("v6")
 	}
 }
+
+func TestSourcesTopPerDestination(t *testing.T) {
+	lookup := func(ip netip.Addr) (uint32, string) {
+		if ip.String() == "198.51.100.4" {
+			return 64999, "NL"
+		}
+		return 64510, "US"
+	}
+	a := New(Config{SourcesPerDst: 3, ASNLookup: lookup}, holder("163.5.191.0/24"))
+	quiet := netip.MustParseAddr("163.5.191.21")
+	for i, n := range []uint64{50, 40, 30, 20} { // 4 sources, only 3 tracked individually
+		r := rec("198.51.100."+string(rune('1'+i)), victim, 17, n, n*1000, 100)
+		r.SrcPort, r.SrcAS = 123, 64500+uint32(i)
+		if i == 3 {
+			r.SrcAS = 0 // not exported: looked up in the table
+		}
+		a.Add(r)
+	}
+	a.Add(rec("198.51.100.9", quiet, 6, 1, 60, 1))
+	start := a.sources.start
+	rows, nets := a.Sources(start.Add(10*time.Second), 100, 2, nil)
+	if len(rows) != 2 {
+		t.Fatalf("want the top 2 sources of the busy destination only, got %+v", rows)
+	}
+	r0 := rows[0]
+	if r0.Src.String() != "198.51.100.1" || r0.Dst != victim || r0.SrcAS != 64500 || r0.SrcPort != 123 || r0.Proto != 17 {
+		t.Fatalf("top row %+v", r0)
+	}
+	if math.Abs(r0.PPS-500) > 1e-6 || math.Abs(r0.DstPPS-1400) > 1e-6 || r0.Sources != 3 || math.Abs(r0.Untracked-200) > 1e-6 {
+		t.Fatalf("rates %+v", r0)
+	}
+	if rows[1].Src.String() != "198.51.100.2" {
+		t.Fatalf("second %+v", rows[1])
+	}
+	// Networks cover every packet: the exporter's AS wins; the untracked 4th source is still counted.
+	byASN := map[uint32]NetRow{}
+	for _, n := range nets {
+		byASN[n.ASN] = n
+	}
+	if len(nets) != 4 || math.Abs(byASN[64500].PPS-500) > 1e-6 || math.Abs(byASN[64999].PPS-200) > 1e-6 ||
+		byASN[64999].Country != "NL" || byASN[64999].Sources != 0 || byASN[64500].Sources != 1 {
+		t.Fatalf("nets %+v", nets)
+	}
+	total := 0.0
+	for _, n := range nets {
+		total += n.PPS
+	}
+	if math.Abs(total-1400) > 1e-6 {
+		t.Fatalf("networks should add up to the destination's rate, got %v", total)
+	}
+	// Window reset; a hot (attacked) destination is reported at any rate.
+	a.Add(rec("198.51.100.9", quiet, 6, 1, 60, 1))
+	hot := func(ip netip.Addr) bool { return ip == quiet }
+	rows, _ = a.Sources(start.Add(20*time.Second), 100, 5, hot)
+	if len(rows) != 1 || rows[0].Dst != quiet || rows[0].Sources != 1 {
+		t.Fatalf("hot destination: %+v", rows)
+	}
+	if rows, nets := a.Sources(start.Add(30*time.Second), 0, 5, nil); len(rows) != 0 || len(nets) != 0 {
+		t.Fatalf("empty window should give nothing, got %+v", rows)
+	}
+}

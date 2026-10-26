@@ -28,6 +28,7 @@ type Record struct {
 	Kind     Kind
 	Exporter netip.Addr
 	Src, Dst netip.Addr
+	SrcAS    uint32 // source AS if the exporter sends it (NetFlow/IPFIX element 16), else 0
 	Proto    uint8
 	SrcPort  uint16
 	DstPort  uint16
