@@ -29,6 +29,8 @@ from ..models import (
 LIVE_ACTION_STATES = ("proposed", "approved", "executing", "active", "withdrawing")
 LIVE_ROUTE_STATES = (RtbhStatus.PENDING_ANNOUNCE, RtbhStatus.ANNOUNCED, RtbhStatus.VERIFIED, RtbhStatus.WITHDRAWING)
 RTBH_STRATEGIES = (Strategy.RTBH_UPSTREAM.value, Strategy.RTBH_INTERNAL.value)
+FILTER_STRATEGIES = (Strategy.LOCAL_FILTER.value,)
+AVAILABLE_STRATEGIES = RTBH_STRATEGIES + FILTER_STRATEGIES
 
 
 @dataclass
@@ -42,6 +44,8 @@ class PlanRequest:
     auto_approve: bool = False       # will run without a person approving: needs the automation switch
     exclude_action_ids: list[str] = field(default_factory=list)   # re-checking an existing action
     acceptance_peer: str | None = None   # Phase 8: canary of an acceptance run over this peer
+    router_ids: list[int] | None = None  # Phase 9 local filtering: None = every enabled router
+    filters: list[dict] | None = None    # Phase 9: drop rules; None = derived from the incident's attack types
 
 
 class Plan(dict):
@@ -169,8 +173,10 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
         return Plan(target=req.target, strategy=req.strategy, blocked=True, routes=[], impact={"statements": []},
                     checks=[{"level": "block", "code": "target_invalid", "message": str(e)}], simulation=True)
     target = str(net)
-    if req.strategy not in RTBH_STRATEGIES:
-        _check(checks, "block", "strategy", f"{req.strategy} is not available yet; only blackholing (RTBH) is.")
+    if req.strategy not in AVAILABLE_STRATEGIES:
+        _check(checks, "block", "strategy", f"{req.strategy} is not available yet; blackholing (RTBH) and local "
+                                            "filtering are.")
+    filtering = req.strategy in FILTER_STRATEGIES
 
     # --- the protected prefix and the customer -----------------------------------------------
     from ..api.prefixes import eligibility_for  # shared with the eligibility API
@@ -183,9 +189,17 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
             _check(checks, "block", "prefix_disabled", f"Protected prefix {pp.prefix} is disabled.")
         if not pp.ownership_verified:
             _check(checks, "block", "ownership", f"Ownership of {pp.prefix} has not been verified.")
-        if not pp.rtbh_allowed:
+        if filtering and not pp.filtering_allowed:
+            _check(checks, "block", "filtering_not_allowed", f"Local filtering is not enabled for {pp.prefix} "
+                                                             "(Protected prefixes → Edit).")
+        if not filtering and not pp.rtbh_allowed:
             _check(checks, "block", "rtbh_not_allowed", f"Blackholing is not enabled for {pp.prefix}.")
-        if not el.within_scope_limit:
+        if filtering and net.prefixlen < (24 if net.version == 4 else 48):
+            _check(checks, "block", "scope", f"Filters apply to a /24 (/48) or smaller, not {target}.")
+        elif filtering:
+            _check(checks, "ok", "prefix", f"{target} is inside {pp.prefix}; ownership verified; filtering allowed."
+                   if pp.enabled and pp.ownership_verified and pp.filtering_allowed else f"{target} is inside {pp.prefix}.")
+        elif not el.within_scope_limit:
             _check(checks, "block", "scope",
                    f"{target} is broader than {pp.prefix} allows (/{pp.min_mitigation_prefix_len} or longer). "
                    "Blackholing a whole range for one address needs an explicit prefix policy.")
@@ -193,7 +207,7 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
             _check(checks, "ok", "prefix", f"{target} is inside {pp.prefix}; ownership verified; blackholing allowed.")
     cust = db.execute(select(CustomerIpAssignment).where(
         cast(target, CIDR).op("<<=")(CustomerIpAssignment.address))).scalar_one_or_none()
-    if cust is not None and cust.rtbh_opt_out:
+    if cust is not None and cust.rtbh_opt_out and not filtering:
         _check(checks, "block", "customer_opt_out", f"Customer {cust.customer_ref} has opted out of blackholing.")
     if cust is not None and cust.service_type == ServiceType.INFRA:
         _check(checks, "block" if req.automatic else "warn", "customer_infra",
@@ -201,13 +215,17 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
                "other customers rely on." + (" Automatic actions never blackhole infrastructure." if req.automatic else ""))
     infra = _infrastructure_addresses(db)
     hits = [f"{a} ({why})" for a, why in infra.items() if ipaddress.ip_address(a) in net]
-    if hits:
+    if hits and not filtering:
         _check(checks, "block", "own_infrastructure",
                "The target includes Shield's own network: " + "; ".join(hits) + ". Blackholing it would cut off management.")
 
     # --- global switches ---------------------------------------------------------------------
     if get_setting(db, "rtbh_emergency_disable", False):
-        _check(checks, "block", "emergency_stop", "Emergency stop is on: new blackholes are blocked.")
+        _check(checks, "block", "emergency_stop", "Emergency stop is on: new blackholes and filters are blocked.")
+    if hits and filtering:
+        _check(checks, "block" if req.automatic else "warn", "own_infrastructure",
+               "The target includes Shield's own network: " + "; ".join(hits) + ". Check the filter cannot cut off "
+               "management." + (" Automatic actions never filter it." if req.automatic else ""))
     if req.auto_approve and not get_setting(db, "automation_enabled", False):
         _check(checks, "block", "automation_off", "Automatic mitigation is turned off.")
 
@@ -275,9 +293,13 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
                    "Internal blackholing drops traffic at your edge after it has crossed the upstream links. "
                    "It does not relieve a saturated upstream link; use upstream blackholing for that.")
 
+    elif filtering:
+        from .filtering import _filter_plan
+        _filter_plan(db, req, net, target, routes, checks, impact)
+
     # --- the BGP speaker ---------------------------------------------------------------------
     speaker = get_setting(db, "bgp_speaker", "simulated")
-    if speaker == "frr" and routes:
+    if speaker == "frr" and routes and not filtering:
         _speaker_checks(db, routes, checks, req.acceptance_peer)
 
     # --- limits and conflicts ----------------------------------------------------------------
@@ -286,7 +308,7 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
         live_q = live_q.where(~RtbhRoute.action_id.in_(exclude))
     live = db.execute(live_q).scalar_one()
     cap = int(get_setting(db, "global_max_rtbh_routes", 50))
-    if live + len(routes) > cap:
+    if live + len(routes) > cap and not filtering:
         _check(checks, "block", "global_limit", f"{live} blackhole routes are in use; this needs {len(routes)} more and the limit is {cap}.")
     conflict_q = select(MitigationAction).where(
         MitigationAction.state.in_(LIVE_ACTION_STATES), MitigationAction.strategy == req.strategy,
@@ -294,11 +316,15 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
     if exclude:
         conflict_q = conflict_q.where(~MitigationAction.id.in_(exclude))
     for a in db.execute(conflict_q).scalars():
-        if a.upstream_id is None or any(r["upstream_id"] == a.upstream_id for r in routes):
+        if filtering:
+            if any(r.get("router_id") == a.router_id for r in routes):
+                _check(checks, "block", "duplicate", f"{target} already has a {a.state.value} filter on this router "
+                                                     f"({str(a.id)[:8]}). Withdraw it first to change the rules.")
+        elif a.upstream_id is None or any(r["upstream_id"] == a.upstream_id for r in routes):
             _check(checks, "block", "duplicate", f"{target} already has a {a.state.value} action ({str(a.id)[:8]}).")
 
     cooldown = int(get_setting(db, "rtbh_flap_cooldown_seconds", 900))
-    recent = db.execute(select(func.max(MitigationAction.completed_at)).where(
+    recent = None if filtering else db.execute(select(func.max(MitigationAction.completed_at)).where(
         MitigationAction.state == ActionState.WITHDRAWN,
         cast(target, CIDR) == MitigationAction.target,
         MitigationAction.completed_at >= now - timedelta(seconds=cooldown))).scalar()
@@ -313,16 +339,21 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
         _check(checks, "warn", "range", f"{target} covers {net.num_addresses} addresses.")
     if pp is not None and routes:
         impact.append(f"No other address in {pp.prefix} is affected.")
-    if cust:
+    if cust and not filtering:
         impact.append(f"Customer {cust.customer_ref}{f' ({cust.customer_name})' if cust.customer_name else ''}, "
                       f"{cust.service_type.value}, loses all connectivity on {target} for the duration.")
+    elif cust:
+        impact.append(f"Customer {cust.customer_ref}{f' ({cust.customer_name})' if cust.customer_name else ''} keeps "
+                      "all traffic except what the filters drop.")
 
     duration = req.duration_seconds or int(get_setting(db, "rtbh_default_duration_minutes", 60)) * 60
     blocked = any(c["level"] == "block" for c in checks)
     return Plan(
         target=target, strategy=req.strategy, blocked=blocked, routes=routes, checks=checks,
         duration_seconds=duration, protected_prefix_id=pp.id if pp else None,
-        simulation=speaker != "frr", speaker=speaker, acceptance_peer=req.acceptance_peer,
+        simulation=(get_setting(db, "filter_backend", "simulated") != "routeros") if filtering else speaker != "frr",
+        speaker=get_setting(db, "filter_backend", "simulated") if filtering else speaker,
+        acceptance_peer=req.acceptance_peer,
         impact={"statements": impact, "addresses": net.num_addresses, "live": _live_load(net),
                 "customer": el.customer},
     )

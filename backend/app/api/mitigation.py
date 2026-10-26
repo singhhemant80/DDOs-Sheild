@@ -1,4 +1,4 @@
-"""Mitigation center API (Phase 6: SIMULATION ONLY - nothing is announced to any router or provider).
+"""Mitigation center API: blackholing (RTBH) and, from Phase 9, local filtering on your routers.
 
 Every write needs a role permission; proposals need an Idempotency-Key header so a retried request
 never creates a second action. Plans are rebuilt (and must still pass) at approval and again just
@@ -22,12 +22,12 @@ from ..db import get_db
 from ..deps import Principal, require
 from ..detector.engine import VECTOR_SPECIFICITY
 from ..mitigation import service
-from ..mitigation.planner import RTBH_STRATEGIES, PlanRequest, build_plan
+from ..mitigation.planner import AVAILABLE_STRATEGIES, PlanRequest, build_plan
 from ..mitigation.speaker import SpeakerError
 from ..mitigation.state import action_out
 from ..models import (
-    ActionState, AttackIncident, MitigationAction, MitigationActionEvent, MitigationPolicy, RtbhRoute, RtbhStatus,
-    UpstreamProvider, User,
+    ActionState, AttackIncident, FilterRule, MitigationAction, MitigationActionEvent, MitigationPolicy, Router, RtbhRoute,
+    RtbhStatus, UpstreamProvider, User,
 )
 from ..rbac import Perm, has_perm
 
@@ -46,13 +46,19 @@ class PlanIn(BaseModel):
     upstream_ids: list[int] | None = None
     incident_id: uuid.UUID | None = None
     duration_minutes: int | None = Field(None, ge=5, le=1440)
+    # local_filter only
+    router_ids: list[int] | None = None
+    filters: list[dict] | None = Field(None, max_length=8)
 
     def request(self, automatic: bool = False) -> PlanRequest:
         return PlanRequest(target=self.target, strategy=self.strategy,
                            upstream_ids=sorted(set(self.upstream_ids)) if self.upstream_ids is not None else None,
                            incident_id=str(self.incident_id) if self.incident_id else None,
                            duration_seconds=self.duration_minutes * 60 if self.duration_minutes else None,
-                           automatic=automatic)
+                           automatic=automatic,
+                           router_ids=sorted(set(self.router_ids)) if self.router_ids is not None else None,
+                           filters=[{k: f.get(k) for k in ("protocol", "src_port", "dst_port", "fragment", "label")}
+                                    for f in self.filters] if self.filters is not None else None)
 
 
 class ReasonIn(BaseModel):
@@ -76,6 +82,8 @@ def _names(db: Session) -> tuple[dict, dict]:
 def _out(a: MitigationAction, ups: dict, users: dict) -> dict:
     o = action_out(a)
     o["upstream"] = ups.get(a.upstream_id)
+    o["router_id"] = a.router_id
+    o["router"] = ((a.plan or {}).get("route") or {}).get("router")
     o["requested_by"] = users.get(o["requested_by_id"])
     o["approved_by"] = users.get(o["approved_by_id"])
     return o
@@ -115,7 +123,8 @@ def propose(body: PlanIn, response: Response, p: Principal = Depends(require(Per
     else:
         audit.record(db, p.actor, "mitigation.propose", "mitigation_group", actions[0].group_id,
                      after={"target": str(actions[0].target), "strategy": body.strategy,
-                            "routes": [a.plan["route"]["description"] for a in actions], "simulation": True})
+                            "routes": [a.plan["route"]["description"] for a in actions],
+                            "simulation": bool(actions[0].plan.get("simulation", True))})
     ups, users = _names(db)
     return {"group_id": str(actions[0].group_id), "replayed": replay, "actions": [_out(a, ups, users) for a in actions]}
 
@@ -149,6 +158,8 @@ def action_detail(action_id: uuid.UUID, _: Principal = Depends(require(Perm.VIEW
         "events": [{"at": e.at, "action_id": str(e.action_id), "from": e.from_state, "to": e.to_state, "actor": e.actor,
                     "detail": e.detail} for e in events],
         "routes": [_route_out(r, ups) for r in routes],
+        "filters": [_filter_out(f, dict(db.execute(select(Router.id, Router.name)).all()))
+                    for f in db.execute(select(FilterRule).where(FilterRule.action_id.in_(ids)).order_by(FilterRule.id)).scalars()],
         "checks_at_approval": (a.plan or {}).get("checks_at_approval"),
     }
 
@@ -238,6 +249,29 @@ def _route_out(r: RtbhRoute, ups: dict) -> dict:
             "last_verify_result": r.last_verify_result}
 
 
+def _filter_out(f: FilterRule, routers: dict) -> dict:
+    from ..mitigation.filtering import Match
+    m = Match.from_dict(f.match)
+    return {"id": f.id, "action_id": str(f.action_id), "router_id": f.router_id, "router": routers.get(f.router_id),
+            "comment": f.comment, "match": f.match, "description": m.describe(), "status": f.status, "backend": f.backend,
+            "router_rule_id": f.router_rule_id, "added_at": f.added_at, "verified_at": f.verified_at,
+            "removed_at": f.removed_at, "packets": f.packets, "bytes": f.bytes, "counted_at": f.counted_at,
+            "last_result": f.last_result}
+
+
+@router.get("/filters")
+def filters(state: str = Query("live", pattern="^(live|all)$"), limit: int = Query(200, ge=1, le=2000),
+            _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
+    """Shield's firewall drop rules (local filtering) with the routers' drop counters."""
+    q = select(FilterRule).order_by(FilterRule.id.desc()).limit(limit)
+    if state == "live":
+        q = q.where(FilterRule.status.in_(("pending", "active", "removing")))
+    routers = dict(db.execute(select(Router.id, Router.name)).all())
+    return {"backend": get_setting(db, "filter_backend", "simulated"),
+            "limit": int(get_setting(db, "filter_max_rules", 50)),
+            "rules": [_filter_out(f, routers) for f in db.execute(q).scalars()]}
+
+
 @router.get("/routes")
 def routes(state: str = Query("live", pattern="^(live|all)$"), limit: int = Query(200, ge=1, le=2000),
            _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
@@ -282,6 +316,7 @@ def controller_status(_: Principal = Depends(require(Perm.VIEW)), db: Session = 
         "require_mfa_for_mitigation": get_setting(db, "require_mfa_for_mitigation", False),
         "production_enabled": get_setting(db, "bgp_production_enabled", False),
         "last_interlock": (st or {}).get("last_interlock") or [],
+        "filter_backend": get_setting(db, "filter_backend", "simulated"),
     }
 
 
@@ -322,8 +357,8 @@ class PolicyIn(BaseModel):
     @field_validator("allowed_strategies")
     @classmethod
     def _strategies(cls, v: list[str]) -> list[str]:
-        if not v or any(s not in RTBH_STRATEGIES for s in v):
-            raise ValueError("only rtbh_upstream and rtbh_internal are available in this release")
+        if not v or any(s not in AVAILABLE_STRATEGIES for s in v):
+            raise ValueError("available strategies: " + ", ".join(AVAILABLE_STRATEGIES))
         return v
 
 

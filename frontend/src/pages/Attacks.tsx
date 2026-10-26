@@ -433,7 +433,8 @@ export function AttackDetail() {
                 <Badge tone={inc.eligibility.steering_allowed ? "ok" : "neutral"}>Steering {inc.eligibility.steering_allowed ? "allowed" : "not allowed"}</Badge>
               </div>
               {inc.eligibility.reasons.length > 0 && <ul className="list-disc pl-5 text-ink-2">{inc.eligibility.reasons.map((r) => <li key={r}>{r}</li>)}</ul>}
-              <IncidentMitigation incidentId={inc.id} target={inc.target} eligible={inc.eligibility.rtbh_allowed} open={!!open} />
+              <IncidentMitigation incidentId={inc.id} target={inc.target} eligible={inc.eligibility.rtbh_allowed}
+                filterEligible={inc.eligibility.filtering_allowed} open={!!open} />
             </div>
           ) : <p className="text-sm text-ink-2">The target is not inside a protected prefix, so no mitigation is possible.</p>}
         </Section>

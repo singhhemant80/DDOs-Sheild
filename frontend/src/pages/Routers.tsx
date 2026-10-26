@@ -13,6 +13,7 @@ export type Router = {
   verify_tls: boolean; api_username: string | null; access_mode: string; dry_run: boolean; enabled: boolean;
   identity: string | null; routeros_version: string | null; status: string; last_seen_at: string | null;
   has_api_password: boolean; notes: string | null; tls_fingerprint: string | null;
+  filter_username?: string | null; has_filter_password?: boolean;
 };
 export type Finding = { level: "ok" | "warn" | "error"; code: string; message: string };
 export type Peer = {
@@ -153,6 +154,7 @@ function RouterDialog({ router, onClose, onSaved, onDeleted }:
     mgmt_address: router?.mgmt_address ?? "", api_port: String(router?.api_port ?? 8729), use_tls: router?.use_tls ?? true,
     verify_tls: router?.verify_tls ?? true, api_username: router?.api_username ?? "", api_password: "",
     tls_fingerprint: router?.tls_fingerprint ?? "", enabled: router?.enabled ?? true, notes: router?.notes ?? "",
+    filter_username: router?.filter_username ?? "", filter_password: "", filter_remove: false,
   });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -163,8 +165,11 @@ function RouterDialog({ router, onClose, onSaved, onDeleted }:
       api_username: f.api_username || null, enabled: f.enabled, notes: f.notes || null,
       ...(f.api_password ? { api_password: f.api_password } : {}) };
     try {
+      const filter = f.filter_remove ? { filter_username: "" }
+        : f.filter_username && (f.filter_password || f.filter_username !== (router?.filter_username ?? ""))
+          ? { filter_username: f.filter_username, ...(f.filter_password ? { filter_password: f.filter_password } : {}) } : {};
       const r = router
-        ? await api<Router>(`/routers/${router.id}`, { method: "PATCH", body: { ...common, tls_fingerprint: f.tls_fingerprint } })
+        ? await api<Router>(`/routers/${router.id}`, { method: "PATCH", body: { ...common, tls_fingerprint: f.tls_fingerprint, ...filter } })
         : await api<Router>("/routers", { method: "POST", body: { ...common, name: f.name, model: f.model,
             mgmt_address: f.mgmt_address, tls_fingerprint: f.tls_fingerprint || null } });
       onSaved(r); onClose();
@@ -183,7 +188,7 @@ function RouterDialog({ router, onClose, onSaved, onDeleted }:
         <Button variant="primary" onClick={save} disabled={busy}>{router ? "Save" : "Add router"}</Button></>}>
       {confirmDelete && <Notice tone="warn">Deleting removes the router, its status history and Shield's BGP sessions recorded
         for it. Upstreams linked to it are kept but unlinked. Nothing on the router itself is changed.</Notice>}
-      <Notice>Shield only reads from routers in this phase. Give it a RouterOS account in a group with just
+      <Notice>Shield reads the router with this account. Give it a RouterOS account in a group with just
         <code className="mx-1">read,api,test</code> and allow it from the Shield server's address only.
         The templates in <code>deploy/mikrotik</code> set this up.</Notice>
       <div className="grid gap-4 sm:grid-cols-2">
@@ -207,11 +212,63 @@ function RouterDialog({ router, onClose, onSaved, onDeleted }:
           <Input className="font-mono text-xs" value={f.tls_fingerprint} onChange={(e) => set("tls_fingerprint", e.target.value)} placeholder="AB:CD:…" /></Field></div>
         <div className="sm:col-span-2"><Check label="Poll this router" checked={f.enabled} onChange={(v) => set("enabled", v)} /></div>
       </div>
+      {router && <div className="space-y-3 rounded-[3px] border border-rule-soft p-3">
+        <div className="text-sm font-medium">Filter account (optional, for local filtering)</div>
+        <p className="text-sm text-ink-2">A second RouterOS user, in a group with only <code>read,write,api</code>, allowed from Shield's address
+          only. Shield uses it just to add and remove its own drop rules in the firewall raw table (chain shield-filter); every other
+          change is refused by Shield itself. The template <code>deploy/mikrotik/shield-filter-user.rsc</code> creates it.
+          RouterOS cannot limit an account to the firewall, so keep this one separate from the read-only account above.</p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Filter username"><Input autoComplete="off" value={f.filter_username} disabled={f.filter_remove}
+            onChange={(e) => set("filter_username", e.target.value)} placeholder="shield-fw" /></Field>
+          <Field label="Filter password" hint={router.has_filter_password ? "Stored encrypted. Leave empty to keep it." : "Stored encrypted; never shown again."}>
+            <Input type="password" autoComplete="new-password" value={f.filter_password} disabled={f.filter_remove}
+              onChange={(e) => set("filter_password", e.target.value)} /></Field>
+        </div>
+        {router.has_filter_password && <Check label="Remove the filter account (Shield goes back to read-only on this router)"
+          checked={f.filter_remove} onChange={(v) => set("filter_remove", v)} />}
+      </div>}
       {f.use_tls && !f.verify_tls && !f.tls_fingerprint && <Notice tone="warn">Without verification or a pin, anyone able to
         intercept the management network could capture these credentials. Pin the certificate once you have checked it.</Notice>}
       {!f.use_tls && <Notice tone="warn">The plain API sends the password unencrypted. Use api-ssl.</Notice>}
       <ErrorLine error={err} />
     </Dialog>
+  );
+}
+
+type FilterTest = { ok: boolean; error?: string; checks?: Finding[]; group?: string };
+type FilterRuleRow = { id: number; action_id: string; router_id: number | null; description: string; status: string; backend: string;
+  packets: number | null; counted_at: string | null; comment: string };
+
+function FilterSection({ r, canEdit, onEdit }: { r: Router; canEdit: boolean; onEdit: () => void }) {
+  const rules = useApi<{ backend: string; rules: FilterRuleRow[] }>("/mitigation/filters", 15_000);
+  const [test, setTest] = useState<FilterTest | "busy" | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const mine = (rules.data?.rules ?? []).filter((x) => x.router_id === r.id);
+  const run = async () => {
+    setErr(null); setTest("busy");
+    try { setTest(await api<FilterTest>(`/routers/${r.id}/filter-test`, { method: "POST" })); } catch (e: any) { setTest(null); setErr(e.message); }
+  };
+  return (
+    <Section title="Local filtering" flush aside={canEdit && (r.has_filter_password
+      ? <Button onClick={run} disabled={test === "busy"}><Plug size={15} /> {test === "busy" ? "Testing…" : "Test filter account"}</Button>
+      : <Button onClick={onEdit}>Add filter account</Button>)}>
+      <div className="space-y-2 px-4 py-3 text-sm">
+        {r.has_filter_password
+          ? <p>Filter account <strong>{r.filter_username}</strong> is set. Filters go to this router when the filter backend is
+              <code className="mx-1">routeros</code>(now <strong>{rules.data?.backend ?? "…"}</strong>, under Settings).</p>
+          : <p className="text-ink-2">No filter account: Shield cannot put drop rules on this router (it stays strictly read-only).</p>}
+        <ErrorLine error={err} />
+        {test && test !== "busy" && (test.ok || test.checks ? <FindingList items={test.checks ?? []} />
+          : <Notice tone="attack">{test.error}</Notice>)}
+      </div>
+      <Table dense rows={mine} rowKey={(x) => String(x.id)} empty="No Shield drop rules on this router."
+        cols={[
+          { key: "d", header: "Shield's drop rules", render: (x) => <Link className="hover:underline" to={`/mitigation/${x.action_id}`}>{x.description}</Link> },
+          { key: "s", header: "State", render: (x) => <Badge tone={x.status === "active" ? "signal" : "neutral"}>{x.status}{x.backend === "simulated" ? " (simulated)" : ""}</Badge> },
+          { key: "p", header: "Dropped", align: "right", render: (x) => x.packets != null ? `${x.packets.toLocaleString()} packets` : "–" },
+        ]} />
+    </Section>
   );
 }
 
@@ -296,6 +353,8 @@ export function RouterDetail() {
             </dl>)}
         </Section>
       </div>
+
+      <FilterSection r={r} canEdit={can("config_network")} onEdit={() => setEditing(true)} />
 
       <Section title="Interfaces" flush aside={<span className="text-xs text-ink-3">Counters every 10 s, measured</span>}>
         <Table dense rows={ifaces} rowKey={(i) => i.name} empty="Not read yet."

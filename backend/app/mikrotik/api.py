@@ -275,10 +275,13 @@ class ReadOnlyClient:
         self.close()
 
     # --- commands ----------------------------------------------------------------------------
+    def _guard(self, words: list[str]) -> None:
+        check_read_only(words)
+
     def _talk(self, words: list[str]) -> list[dict]:
         """Send one sentence; return the attribute dicts of !re replies followed by the !done attrs."""
         try:
-            check_read_only(words)
+            self._guard(words)
         except WriteRefused:
             self.refused_writes += 1
             raise

@@ -48,16 +48,28 @@ PHASES: list[dict] = [
      "exit": "Acceptance tests prove unrelated prefixes are unaffected.", "release": "0.8"},
     {"n": 9, "title": "Selective steering, local filtering, scrubbing",
      "scope": "Selective upstream blackholing and steering, local filtering on the router, scrubbing-centre adapter.",
-     "exit": "To be defined: the specification text stops partway through this phase.", "release": None,
-     "blocked": "The rest of the Phase 9 specification is needed before work starts."},
+     "exit": "Each part: drops or diverts only the attack traffic, verified, reversible; nothing else on the router changes.",
+     "release": "0.9", "in_progress": True,
+     "parts": [
+         {"title": "Local filtering on MikroTik (firewall raw drop rules)", "status": "done", "release": "0.9"},
+         {"title": "Selective ISP steering (withhold / prepend towards one upstream)", "status": "pending"},
+         {"title": "Scrubbing-centre adapter", "status": "pending"},
+     ],
+     "verify": ["Run local filtering against a real CCR2004/CCR2116 (tested on the RouterOS protocol simulator)"],
+     "blocked": "Designed from the parts of the specification available; its Phase 9 text is incomplete."},
     {"n": 10, "title": "Alerting, reporting and hardening",
      "scope": "Email, Telegram and webhook alerts, reports, hardening, production checklist.",
      "exit": "To be defined with the rest of the specification.", "release": None},
 ]
 
 
-def _status(n: int) -> str:
-    return "done" if n <= CURRENT else ("next" if n == CURRENT + 1 else "pending")
+def _status(p: dict) -> str:
+    n = p["n"]
+    if n <= CURRENT:
+        return "done"
+    if p.get("in_progress"):
+        return "in_progress"
+    return "next" if n == CURRENT + 1 else "pending"
 
 
 def _peers(rds) -> dict[str, str]:
@@ -122,10 +134,16 @@ def checklist(db: Session) -> list[dict]:
     add("acceptance", "Acceptance run passed on every production session",
         production and all(n.acceptance_passed_at for n in production),
         "BGP sessions → Acceptance run, with an unused address in a protected prefix.", "/bgp", 8)
+    fr = db.execute(select(Router).where(Router.enabled.is_(True), Router.filter_password_enc.is_not(None))).first()
+    add("filter", "Local filtering on the router (optional)",
+        fr is not None and get_setting(db, "filter_backend", "simulated") == "routeros",
+        "Add a filter account to the router (Routers & upstreams → Edit), test it, then set filter_backend = routeros.",
+        "/routers", 9)
     return items
 
 
 def roadmap(db: Session) -> dict:
-    phases = [{**p, "status": _status(p["n"]), "verify": p.get("verify", []), "blocked": p.get("blocked")} for p in PHASES]
+    phases = [{**p, "status": _status(p), "verify": p.get("verify", []), "blocked": p.get("blocked"),
+               "parts": p.get("parts", [])} for p in PHASES]
     return {"version": __version__, "current": CURRENT, "total": len(PHASES), "phases": phases,
             "checklist": checklist(db)}

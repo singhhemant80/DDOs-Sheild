@@ -230,6 +230,9 @@ class RouterUpdate(BaseModel):
     enabled: bool | None = None
     notes: str | None = Field(None, max_length=2000)
     tls_fingerprint: str | None = Field(None, max_length=200)
+    # Phase 9: separate account for Shield's firewall drop rules. "" clears it.
+    filter_username: str | None = Field(None, max_length=64, pattern=r"^[A-Za-z0-9_.@-]{0,64}$")
+    filter_password: str | None = Field(None, max_length=256)
 
     _fp = field_validator("tls_fingerprint")(lambda cls, v: _fingerprint(v))
 
@@ -254,6 +257,8 @@ class RouterOut(_Out):
     last_seen_at: datetime | None
     notes: str | None
     tls_fingerprint: str | None = None
+    filter_username: str | None = None
+    has_filter_password: bool = False
 
     _a = field_validator("mgmt_address", mode="before")(_str)
 

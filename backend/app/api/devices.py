@@ -25,6 +25,7 @@ router = APIRouter(prefix="/routers", tags=["routers"])
 def _out(r: Router) -> RouterOut:
     o = RouterOut.model_validate(r)
     o.has_api_password = bool(r.api_password_enc)
+    o.has_filter_password = bool(r.filter_password_enc)
     return o
 
 
@@ -104,6 +105,8 @@ def update_router(router_id: int, body: RouterUpdate, p: Principal = Depends(req
     before = audit.snapshot(r)
     data = body.model_dump(exclude_unset=True)
     pw = data.pop("api_password", None)
+    fuser = data.pop("filter_username", None)
+    fpw = data.pop("filter_password", None)
     for k, v in data.items():
         if v is not None:
             setattr(r, k, v)
@@ -111,8 +114,23 @@ def update_router(router_id: int, body: RouterUpdate, p: Principal = Depends(req
         r.api_password_enc = _encrypt(pw)
     if data.get("tls_fingerprint") == "":
         r.tls_fingerprint = None
-    if r.access_mode == AccessMode.READ_WRITE and not (r.use_tls and r.verify_tls):
-        raise HTTPException(422, "read_write access requires verified TLS")
+    if fuser == "":
+        if _open_filters(db, r.id):
+            raise HTTPException(409, "Withdraw this router's active filters before removing its filter account")
+        r.filter_username, r.filter_password_enc = None, None
+        r.access_mode = AccessMode.READ_ONLY
+    elif fuser is not None or fpw:
+        if fuser is not None:
+            if fuser == r.api_username:
+                raise HTTPException(422, "Use a separate account for filtering; the polling account stays read-only")
+            r.filter_username = fuser
+        if fpw:
+            r.filter_password_enc = _encrypt(fpw)
+        if not (r.filter_username and r.filter_password_enc):
+            raise HTTPException(422, "The filter account needs a username and a password")
+        r.access_mode = AccessMode.READ_WRITE
+    if r.access_mode == AccessMode.READ_WRITE and not (r.use_tls and (r.verify_tls or r.tls_fingerprint)):
+        raise HTTPException(422, "Changing a router (filter account) needs TLS with a verified or pinned certificate")
     if data.get("dry_run") is False and r.access_mode != AccessMode.READ_WRITE:
         raise HTTPException(422, "dry_run can only be disabled on read_write routers")
     record_change(db, p.actor, "router.update", "router", r, before=before)
@@ -127,6 +145,13 @@ def delete_router(router_id: int, p: Principal = Depends(require(Perm.CONFIG_NET
     before = audit.snapshot(r)
     db.delete(r)
     record_change(db, p.actor, "router.delete", "router", None, entity_id=router_id, before=before)
+
+
+def _open_filters(db: Session, router_id: int) -> bool:
+    from ..models import MitigationAction, Strategy
+    return db.execute(select(MitigationAction.id).where(
+        MitigationAction.router_id == router_id, MitigationAction.strategy == Strategy.LOCAL_FILTER,
+        MitigationAction.state.in_(["approved", "executing", "active", "withdrawing", "failed"]))).first() is not None
 
 
 def _get(db: Session, router_id: int) -> Router:
@@ -167,6 +192,58 @@ def router_certificate(router_id: int, p: Principal = Depends(require(Perm.CONFI
     info["pinned"] = r.tls_fingerprint
     info["matches_pin"] = r.tls_fingerprint == info["fingerprint"] if r.tls_fingerprint else None
     return info
+
+
+FILTER_NEEDS = {"read", "write", "api"}
+FILTER_TOO_MUCH = {"policy", "password", "sensitive", "reboot", "ssh", "telnet", "ftp", "winbox", "web", "local",
+                   "sniff", "romon", "rest-api"}
+
+
+@router.post("/{router_id}/filter-test")
+def test_filter_account(router_id: int, p: Principal = Depends(require(Perm.CONFIG_NETWORK)),
+                        db: Session = Depends(get_db)):
+    """Log in with the filter account and read (never change) what local filtering needs: the
+    account's permissions, Shield's rules and the jump rule in the firewall raw table."""
+    from ..mikrotik.filterapi import RAW, FilterClient
+    r = _get(db, router_id)
+    if not (r.filter_username and r.filter_password_enc):
+        raise HTTPException(422, "Set the filter account first")
+    try:
+        password = security.decrypt_secret(r.filter_password_enc)
+    except Exception:
+        raise HTTPException(503, "The stored filter password cannot be decrypted; enter it again") from None
+    checks: list[dict] = []
+    try:
+        with FilterClient(str(r.mgmt_address), r.api_port, r.filter_username, password, use_tls=r.use_tls,
+                          verify_tls=r.verify_tls, fingerprint=r.tls_fingerprint) as c:
+            users = c.print("/user", queries=[f"name={r.filter_username}"])
+            group = users[0].get("group") if users else None
+            groups = c.print("/user/group", queries=[f"name={group}"]) if group else []
+            policy = {x for x in (groups[0].get("policy", "") if groups else "").split(",") if x and not x.startswith("!")}
+            rules = c.shield_rules(4)
+            raw_total = c.count(RAW[4])
+        missing = FILTER_NEEDS - policy
+        extra = sorted(policy & FILTER_TOO_MUCH)
+        if missing:
+            checks.append({"level": "error", "code": "filter_perm",
+                           "message": f"The account's group ({group}) lacks: {', '.join(sorted(missing))}."})
+        else:
+            checks.append({"level": "ok", "code": "filter_perm", "message": f"Group {group} may read, write and use the API."})
+        if extra:
+            checks.append({"level": "warn", "code": "filter_extra",
+                           "message": f"The group also allows {', '.join(extra)}; remove what Shield does not need "
+                                      "(it needs only read, write, api)."})
+        jump = any(x.get("comment") == "shield:jump" for x in rules)
+        checks.append({"level": "ok", "code": "filter_rules",
+                       "message": f"Firewall raw has {raw_total} rules, {len(rules)} of them Shield's"
+                                  + ("" if jump else "; the shield-filter jump is added with the first filter") + "."})
+        result = {"ok": not missing, "checks": checks, "group": group, "policy": sorted(policy)}
+    except ros.TLSUntrusted as e:
+        result = {"ok": False, "kind": e.kind, "error": str(e)}
+    except ros.RouterOSError as e:
+        result = {"ok": False, "kind": e.kind, "error": str(e)}
+    audit.record(db, p.actor, "router.filter_test", "router", router_id, after={"ok": result["ok"]})
+    return result
 
 
 @router.post("/{router_id}/test")

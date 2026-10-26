@@ -25,6 +25,8 @@ class Conflict(Exception):
 def request_fingerprint(req: PlanRequest) -> str:
     body = {"target": req.target, "strategy": req.strategy, "upstreams": sorted(req.upstream_ids or []),
             "incident": req.incident_id, "duration": req.duration_seconds}
+    if req.router_ids is not None or req.filters is not None:
+        body |= {"routers": sorted(req.router_ids or []), "filters": req.filters}
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
 
@@ -53,7 +55,7 @@ def propose(db: Session, req: PlanRequest, *, key: str, actor: str, user_id=None
             id=uuid.uuid4(), idempotency_key=f"{key}#{r['peer']}"[:128], group_id=group,
             incident_id=uuid.UUID(req.incident_id) if req.incident_id else None, policy_id=policy_id,
             strategy=Strategy(req.strategy), target=plan["target"], protected_prefix_id=plan["protected_prefix_id"],
-            upstream_id=r["upstream_id"], state=None, dry_run=plan.get("simulation", True), automatic=req.automatic,
+            upstream_id=r["upstream_id"], router_id=r.get("router_id"), state=None, dry_run=plan.get("simulation", True), automatic=req.automatic,
             requested_by_id=user_id, timeout_seconds=60,
             plan={"route": r, "checks": plan["checks"], "duration_seconds": plan["duration_seconds"],
                   "request_fingerprint": fp, "simulation": plan.get("simulation", True),
@@ -77,6 +79,9 @@ def recheck(db: Session, actions: list[MitigationAction], *, automatic: bool = F
                       duration_seconds=(a0.plan or {}).get("duration_seconds"), automatic=automatic,
                       auto_approve=auto_approve, acceptance_peer=(a0.plan or {}).get("acceptance_peer"),
                       exclude_action_ids=[str(a.id) for a in actions])
+    if a0.strategy == Strategy.LOCAL_FILTER:
+        req.router_ids = [a.router_id for a in actions if a.router_id is not None]
+        req.filters = list(((a0.plan or {}).get("route") or {}).get("filters") or [])
     return build_plan(db, req)
 
 

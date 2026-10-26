@@ -268,6 +268,10 @@ class Router(TimestampMixin, Base):
     # Phase 5: SHA-256 of the router's API-SSL certificate ("AB:CD:..."). When set, the connection is
     # accepted only if the presented certificate matches, whatever CA signed it.
     tls_fingerprint: Mapped[str | None] = mapped_column(String(95))
+    # Phase 9: a second, separate RouterOS account used only to add and remove Shield's own
+    # firewall drop rules (local filtering). The polling account stays read-only.
+    filter_username: Mapped[str | None] = mapped_column(String(64))
+    filter_password_enc: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
         CheckConstraint("api_port BETWEEN 1 AND 65535", name="ck_routers_port"),
@@ -749,6 +753,7 @@ class MitigationAction(TimestampMixin, Base):
             "strategy",
             "target",
             text("coalesce(upstream_id, 0)"),
+            text("coalesce(router_id, 0)"),
             unique=True,
             postgresql_where=text("state NOT IN ('rejected','withdrawn','rolled_back','failed')"),
         ),
@@ -825,6 +830,38 @@ class RtbhRoute(TimestampMixin, Base):
         Index("ix_rtbh_status", "status"),
         Index("ix_rtbh_prefix_gist", "prefix", postgresql_using="gist", postgresql_ops={"prefix": "inet_ops"}),
         CheckConstraint("mode = 'internal' OR upstream_id IS NOT NULL", name="ck_rtbh_upstream_required"),
+    )
+
+
+class FilterRule(TimestampMixin, Base):
+    """Ledger of every firewall drop rule Shield put on a router (Phase 9 local filtering).
+
+    `comment` is what identifies the rule on the router ("shield:<action id>:<n>"); Shield only ever
+    removes rules whose comment starts with "shield:"."""
+
+    __tablename__ = "filter_rules"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    action_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("mitigation_actions.id", ondelete="RESTRICT"), nullable=False)
+    router_id: Mapped[int | None] = mapped_column(ForeignKey("routers.id", ondelete="SET NULL"))
+    comment: Mapped[str] = mapped_column(String(128), nullable=False)
+    match: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)   # pending, active, removing, removed, failed
+    backend: Mapped[str] = mapped_column(String(16), nullable=False)  # simulated | routeros
+    router_rule_id: Mapped[str | None] = mapped_column(String(32))
+    added_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    packets: Mapped[int | None] = mapped_column(BigInteger)   # dropped so far, from the router's counters
+    bytes: Mapped[int | None] = mapped_column(BigInteger)
+    counted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_result: Mapped[dict | None] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index("ix_filter_rules_status", "status"),
+        Index("ix_filter_rules_action", "action_id"),
+        CheckConstraint("status IN ('pending','active','removing','removed','failed')", name="ck_filter_rules_status"),
+        CheckConstraint("comment LIKE 'shield:%'", name="ck_filter_rules_comment"),
     )
 
 
@@ -950,6 +987,8 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "four_eyes_approval": (False, "A mitigation must be approved by someone other than the person who proposed it."),
     "proposal_ttl_minutes": (15, "Proposals not approved within this time expire; the situation has probably changed."),
     "rtbh_flap_cooldown_seconds": (900, "After a blackhole is withdrawn, re-blackholing the same address within this time needs a human (no automatic re-announce)."),
+    "filter_backend": ("simulated", "Where local filtering rules go: 'simulated' (nothing changes on any router) or 'routeros' (Shield's filter account adds its own drop rules to the router's firewall raw table)."),
+    "filter_max_rules": (50, "Hard ceiling on Shield's firewall drop rules across all routers."),
     "bgp_production_enabled": (False, "Production BGP sessions are configured and may carry blackholes (each only after its acceptance run passes). Changed only through its own switch."),
     "bgp_speaker": ("simulated", "Where blackhole routes are announced: 'simulated' (nothing leaves Shield) or 'frr' (Shield's FRR BGP speaker: staging sessions, and production sessions once production is switched on)."),
     "bgp_router_id": ("", "BGP router ID of Shield's FRR speaker (an IPv4 address of this server)."),

@@ -45,6 +45,7 @@ disabling a user revokes sessions immediately.
 | Attacks | `GET /attacks?state=open\|closed\|all&severity=&q=&confirmed_only=`, `/attacks/summary`, `/attacks/{id}`, `/attacks/{id}/series`, `/attacks/{id}/sources` (top source addresses, networks (AS) and countries; `since=` filters the list) | read-only |
 | Attack actions | `POST /attacks/{id}/acknowledge`, `/attacks/{id}/false-positive` (`{"note": "..."}`), `/attacks/{id}/notes` | NOC operator |
 | Mitigation | `POST /mitigation/preview`, `POST /mitigation/actions` (header `Idempotency-Key` required), `GET /mitigation/actions?state=live\|proposed\|active\|closed\|all&incident_id=`, `GET /mitigation/actions/{id}`, `POST …/{id}/approve`, `…/reject` and `…/withdraw?whole_group=` (`{"reason": "..."}`), `…/extend` (`{"minutes": 60}`), `GET /mitigation/routes`, `GET /mitigation/status` | NOC operator |
+| Local filtering | `POST /mitigation/preview` and `/mitigation/actions` with `strategy: "local_filter"`, optional `router_ids` and `filters` (`[{"protocol": "udp", "src_port": 123}]`; derived from the incident when omitted), `GET /mitigation/filters`, `POST /routers/{id}/filter-test`; router PATCH takes `filter_username` / `filter_password` (write-only, `""` clears) | Network engineer |
 | Mitigation policies | `GET/POST /mitigation/policies`, `PUT/DELETE /mitigation/policies/{id}` | Network engineer |
 | Detection | `GET/POST /detection/profiles`, `PUT/DELETE /detection/profiles/{id}`, `GET /detection/status` | Network engineer (profiles) |
 

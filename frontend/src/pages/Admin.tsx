@@ -199,6 +199,10 @@ function SettingValue({ s, editable, onSave }: { s: Setting; editable: boolean; 
     return <Select aria-label={s.key} value={String(s.value)} onChange={onSave}
       options={[["simulated", "Simulated (nothing leaves Shield)"], ["frr", "FRR (Shield's BGP speaker)"]]} />;
   }
+  if (s.key === "filter_backend") {
+    return <Select aria-label={s.key} value={String(s.value)} onChange={onSave}
+      options={[["simulated", "Simulated (no router is changed)"], ["routeros", "RouterOS (Shield's filter account)"]]} />;
+  }
   if (typeof s.value === "string") {
     return (
       <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); onSave(v.trim()); }}>

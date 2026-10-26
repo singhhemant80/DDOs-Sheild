@@ -4,7 +4,8 @@
 
 It speaks the real API wire protocol (plain or TLS with a generated self-signed certificate),
 checks the login, serves RouterOS 7-shaped data for the paths Shield reads, evaluates simple
-`?key=value` queries and `.proplist`, and rejects every write with !trap. Interface counters
+`?key=value` queries and `.proplist`, and rejects every write with !trap, except add/remove in
+/ip(v6)/firewall/raw for users listed in `writers` (Phase 9 local filtering). Interface counters
 advance with simulated traffic so polled rates are realistic. It is a test fixture, not an
 emulator: only what Shield needs is modelled.
 """
@@ -86,13 +87,22 @@ def default_state(name: str = "edge-r1", mgmt: str = "10.255.0.1", model: str = 
             {".id": "*3", "name": "winbox", "port": "8291", "disabled": "false", "address": "10.255.0.0/24"},
         ],
         "/interface/ethernet/switch": [],
+        "/ip/firewall/raw": [
+            {".id": "*1", "chain": "prerouting", "action": "accept", "src-address": "10.255.0.0/24",
+             "comment": "management", "disabled": "false", "packets": "1200", "bytes": "96000"},
+            {".id": "*2", "chain": "prerouting", "action": "drop", "src-address-list": "bogons",
+             "comment": "operator bogon filter", "disabled": "false", "packets": "55", "bytes": "3300"},
+        ],
+        "/ipv6/firewall/raw": [],
         "/user": [
             {".id": "*1", "name": "admin", "group": "full", "address": "", "disabled": "false"},
             {".id": "*2", "name": "shield-ro", "group": "shield-read", "address": "10.255.0.10/32", "disabled": "false"},
+            {".id": "*3", "name": "shield-fw", "group": "shield-filter", "address": "10.255.0.10/32", "disabled": "false"},
         ],
         "/user/group": [
             {".id": "*1", "name": "full", "policy": "local,telnet,ssh,ftp,reboot,read,write,policy,test,winbox,password,web,sniff,sensitive,api,romon,rest-api"},
             {".id": "*2", "name": "shield-read", "policy": "read,api,test,!local,!telnet,!ssh,!ftp,!reboot,!write,!policy,!winbox,!password,!web,!sniff,!sensitive,!romon,!rest-api"},
+            {".id": "*3", "name": "shield-filter", "policy": "read,write,api,!local,!telnet,!ssh,!ftp,!reboot,!policy,!test,!winbox,!password,!web,!sniff,!sensitive,!romon,!rest-api"},
         ],
     }
 
@@ -106,8 +116,10 @@ def _iface(id_, name, type_, comment, running=True):
 
 class RouterOSSimulator:
     def __init__(self, host="127.0.0.1", port=0, tls=False, users=None, state=None,
-                 traffic_bps: dict[str, float] | None = None):
+                 traffic_bps: dict[str, float] | None = None, writers: set[str] | None = None):
         self.users = users or {"shield-ro": "Test-Password-123"}
+        self.writers = writers or set()
+        self._next_id = 100
         self.state = state or default_state()
         self.lock = threading.Lock()
         self.traffic_bps = traffic_bps if traffic_bps is not None else {"sfp-sfpplus1": 2.4e9, "sfp-sfpplus3": 0.6e9}
@@ -179,6 +191,7 @@ class RouterOSSimulator:
             conn.settimeout(30)
             rd = _Reader(conn)
             authed = False
+            user = None
             while True:
                 words = rd.sentence()
                 if not words:
@@ -191,6 +204,7 @@ class RouterOSSimulator:
                 if cmd == "/login":
                     if self.users.get(attrs.get("name")) == attrs.get("password"):
                         authed = True
+                        user = attrs.get("name")
                         conn.sendall(encode_sentence(["!done"]))
                     else:
                         conn.sendall(encode_sentence(["!trap", "=message=invalid user name or password (6)"])
@@ -202,7 +216,7 @@ class RouterOSSimulator:
                 if cmd == "/quit":
                     conn.sendall(encode_sentence(["!fatal", "session terminated on request"]))
                     return
-                conn.sendall(self._reply(cmd, attrs, queries))
+                conn.sendall(self._reply(cmd, attrs, queries, user))
         except (OSError, ConnectionError, ssl.SSLError):
             pass
         except Exception:
@@ -213,9 +227,39 @@ class RouterOSSimulator:
             except OSError:
                 pass
 
-    def _reply(self, cmd: str, attrs: dict, queries: list[str]) -> bytes:
+    def count_packets(self, path: str, comment: str, packets: int, nbytes: int = 0) -> None:
+        """Advance a rule's counters (tests: traffic matched by a drop rule)."""
+        with self.lock:
+            for r in self.state[path]:
+                if r.get("comment") == comment:
+                    r["packets"] = str(int(r.get("packets", "0")) + packets)
+                    r["bytes"] = str(int(r.get("bytes", "0")) + nbytes)
+
+    def _write(self, cmd: str, attrs: dict, user: str | None) -> bytes:
+        trap = lambda m: encode_sentence(["!trap", f"=message={m}"]) + encode_sentence(["!done"])  # noqa: E731
+        base, _, verb = cmd.rpartition("/")
+        if user not in self.writers or base not in ("/ip/firewall/raw", "/ipv6/firewall/raw") or verb not in ("add", "remove"):
+            return trap("not enough permissions (9)")
+        with self.lock:
+            rows = self.state.setdefault(base, [])
+            if verb == "remove":
+                n = len(rows)
+                rows[:] = [r for r in rows if r.get(".id") != attrs.get("numbers")]
+                return encode_sentence(["!done"]) if len(rows) < n else trap("no such item")
+            self._next_id += 1
+            rid = f"*{self._next_id:X}"
+            row = {".id": rid, **{k: v for k, v in attrs.items() if k != "place-before"}, "packets": "0", "bytes": "0",
+                   "disabled": attrs.get("disabled", "false").replace("no", "false")}
+            before = attrs.get("place-before")
+            idx = next((i for i, r in enumerate(rows) if r.get(".id") == before), None) if before else None
+            if before and idx is None:
+                return trap("no such item")
+            rows.insert(idx if idx is not None else len(rows), row)
+            return encode_sentence(["!done", f"=ret={rid}"])
+
+    def _reply(self, cmd: str, attrs: dict, queries: list[str], user: str | None = None) -> bytes:
         if not cmd.endswith("/print"):
-            return encode_sentence(["!trap", "=message=not enough permissions (9)"]) + encode_sentence(["!done"])
+            return self._write(cmd, attrs, user)
         path = cmd[: -len("/print")]
         with self.lock:
             if path == "/interface":
@@ -227,6 +271,8 @@ class RouterOSSimulator:
             k, _, v = q.partition("=")
             rows = [r for r in rows if r.get(k, "false" if v in ("false", "no") else None) == v
                     or (v in ("yes", "true") and r.get(k) in ("yes", "true"))]
+        if "count-only" in attrs:
+            return encode_sentence(["!done", f"=ret={len(rows)}"])
         prop = attrs.get(".proplist")
         out = b""
         for r in rows:

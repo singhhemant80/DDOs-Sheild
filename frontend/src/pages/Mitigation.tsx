@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Check as CheckIcon, CircleAlert, FlaskConical, Pencil, Plus, Radio, ShieldBan, TriangleAlert, Undo2, X } from "lucide-react";
+import { ArrowLeft, Check as CheckIcon, CircleAlert, Filter, FlaskConical, Pencil, Plus, Radio, ShieldBan, TriangleAlert, Undo2, X } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useApi } from "../lib/hooks";
@@ -10,8 +10,10 @@ import { Badge, Button, Check, Dialog, ErrorLine, Field, Input, Lamp, Notice, Pa
 
 // ---------------------------------------------------------------- types
 export type CheckRow = { level: "block" | "warn" | "ok"; code: string; message: string };
+export type FilterMatch = { dst?: string; protocol: string | null; src_port: number | null; dst_port: number | null; fragment: boolean; label?: string };
 type PlanRoute = { peer: string; upstream_id: number | null; upstream: string | null; asn: number | null; prefix: string;
-  communities: string[]; next_hop: string | null; no_export: boolean; description: string };
+  communities: string[]; next_hop: string | null; no_export: boolean; description: string;
+  router_id?: number | null; router?: string | null; filters?: FilterMatch[] };
 export type Plan = { target: string; strategy: string; blocked: boolean; routes: PlanRoute[]; checks: CheckRow[];
   duration_seconds: number; simulation: boolean;
   impact: { statements: string[]; addresses: number; live: { available: boolean; reason?: string; pps?: number; bps?: number; provenance?: string | null; seen?: boolean };
@@ -22,10 +24,13 @@ export type Action = {
   requested_by: string | null; approved_by: string | null; approved_at: string | null; created_at: string;
   started_at: string | null; expires_at: string | null; completed_at: string | null; extensions: number; attempts: number;
   error: string | null; rejected_reason: string | null; withdraw_reason: string | null; route: PlanRoute | null;
+  router_id?: number | null; router?: string | null;
   checks: CheckRow[]; impact: Plan["impact"];
 };
+type FilterLedger = { id: number; action_id: string; router: string | null; comment: string; description: string; status: string;
+  backend: string; packets: number | null; bytes: number | null; counted_at: string | null; verified_at: string | null; removed_at: string | null };
 type Detail = Action & { group: Action[]; events: { at: string; action_id: string; from: string | null; to: string; actor: string; detail: Record<string, any> }[];
-  routes: LedgerRoute[]; checks_at_approval: CheckRow[] | null };
+  routes: LedgerRoute[]; checks_at_approval: CheckRow[] | null; filters: FilterLedger[] };
 type LedgerRoute = { id: number; action_id: string; mode: string; prefix: string; upstream: string | null; communities: string[];
   next_hop: string | null; status: string; speaker: string; announced_at: string | null; verified_at: string | null; withdrawn_at: string | null };
 type Upstream = { id: number; name: string; asn: number; enabled: boolean; rtbh_policy: { enabled: boolean; verified_at: string | null; communities: string[] } | null };
@@ -35,6 +40,12 @@ type Status = { mode: string; running: boolean; counts: Record<string, number>; 
   controller: { ts: number; leader: boolean; speaker_routes: number | null; last_reconcile: { at?: string; ok?: boolean; error?: string; reannounced?: string[]; withdrawn?: string[] } } | null };
 
 // ---------------------------------------------------------------- vocabulary
+const FILTER_EVENT_WORD: Record<string, string> = {
+  active: "Rules added and verified on the router", announce_failed: "Adding the rules failed", withdrawn: "Rules removed",
+  rolled_back: "Rules rolled back", withdrawn_failed: "Removing the rules failed",
+};
+export const whereOf = (a: { strategy: string; upstream: string | null; router?: string | null }) =>
+  a.strategy === "local_filter" ? `Filter on ${a.router ?? "router"}` : a.upstream ?? "Own edge routers";
 export const ACTION_WORD: Record<string, string> = {
   proposed: "Awaiting approval", approved: "Approved", executing: "Announcing", active: "Active",
   withdrawing: "Withdrawing", withdrawn: "Withdrawn", rejected: "Rejected", failed: "Failed", rolled_back: "Rolled back",
@@ -113,6 +124,18 @@ export function SimulationBanner() {
   );
 }
 
+export function FilterBanner() {
+  const st = useApi<{ filter_backend?: string }>("/mitigation/status", 30_000);
+  if (st.data?.filter_backend === "routeros") {
+    return <Notice tone="signal"><span className="inline-flex items-start gap-2"><Radio size={16} className="mt-0.5 shrink-0" />
+      <span><strong>Filters go to your routers.</strong> Shield's filter account adds drop rules to the router's firewall raw table
+        (chain shield-filter), only for the traffic shown, and removes them when the action ends.</span></span></Notice>;
+  }
+  return <Notice tone="warn"><span className="inline-flex items-start gap-2"><FlaskConical size={16} className="mt-0.5 shrink-0" />
+    <span><strong>Filter simulation.</strong> The whole workflow runs, but no rule is added to any router. Set filter_backend to
+      routeros in Settings, and add a filter account to the router, to filter for real.</span></span></Notice>;
+}
+
 function WithdrawAllDialog({ count, onClose, onDone }: { count: number; onClose: () => void; onDone: () => void }) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -158,7 +181,7 @@ function PlanView({ plan }: { plan: Plan }) {
       {plan.blocked ? <Notice tone="attack">This cannot go ahead: see the checks marked in red.</Notice> : null}
       {plan.routes.length > 0 && (
         <div>
-          <div className="mb-1 text-sm font-medium">Would announce</div>
+          <div className="mb-1 text-sm font-medium">{plan.strategy === "local_filter" ? "Would add" : "Would announce"}</div>
           <ul className="space-y-1 font-mono text-[12.5px]">
             {plan.routes.map((r) => <li key={r.peer} className="rounded-[2px] bg-sunk px-2 py-1">{r.description}</li>)}
           </ul>
@@ -181,27 +204,73 @@ function PlanView({ plan }: { plan: Plan }) {
 }
 
 // ---------------------------------------------------------------- new mitigation
-export function NewMitigationDialog({ target: initial = "", incidentId, onClose, onDone }:
-  { target?: string; incidentId?: string; onClose: () => void; onDone: (a: Action[]) => void }) {
+type Rtr = { id: number; name: string; enabled: boolean; has_filter_password?: boolean };
+
+function FilterEditor({ rows, onChange }: { rows: FilterMatch[]; onChange: (r: FilterMatch[]) => void }) {
+  const set = (i: number, patch: Partial<FilterMatch>) => onChange(rows.map((r, n) => n === i ? { ...r, ...patch } : r));
+  const kind = (r: FilterMatch) => r.fragment ? "fragment" : r.protocol ?? "udp";
+  return (
+    <div className="space-y-2">
+      {rows.map((r, i) => (
+        <div key={i} className="flex flex-wrap items-end gap-2 rounded-[3px] border border-rule-soft p-2">
+          <Field label="Drop"><Select value={kind(r)} onChange={(v) => set(i, v === "fragment"
+              ? { protocol: null, fragment: true, src_port: null, dst_port: null }
+              : { protocol: v, fragment: false, ...(v === "icmp" ? { src_port: null, dst_port: null } : {}) })}
+            options={[["udp", "UDP"], ["tcp", "TCP"], ["icmp", "ICMP"], ["fragment", "Fragments"]]} /></Field>
+          {(r.protocol === "udp" || r.protocol === "tcp") && <>
+            <Field label="From port"><Input className="w-24" inputMode="numeric" value={r.src_port ?? ""}
+              onChange={(e) => set(i, { src_port: e.target.value ? Number(e.target.value) : null })} placeholder="any" /></Field>
+            <Field label="To port"><Input className="w-24" inputMode="numeric" value={r.dst_port ?? ""}
+              onChange={(e) => set(i, { dst_port: e.target.value ? Number(e.target.value) : null })} placeholder="any" /></Field></>}
+          {r.label && <span className="pb-2 text-xs text-ink-3">{r.label}</span>}
+          <Button variant="quiet" className="ml-auto" onClick={() => onChange(rows.filter((_, n) => n !== i))} aria-label="Remove filter"><X size={15} /></Button>
+        </div>))}
+      {rows.length < 8 && <Button variant="quiet" onClick={() => onChange([...rows, { protocol: "udp", src_port: null, dst_port: null, fragment: false }])}>
+        <Plus size={15} /> Add a filter</Button>}
+    </div>
+  );
+}
+
+export function NewMitigationDialog({ target: initial = "", incidentId, initialStrategy = "rtbh_upstream", onClose, onDone }:
+  { target?: string; incidentId?: string; initialStrategy?: string; onClose: () => void; onDone: (a: Action[]) => void }) {
   const ups = useApi<Upstream[]>("/upstreams");
+  const routers = useApi<Rtr[]>("/routers");
   const usable = (ups.data ?? []).filter((u) => u.enabled && u.rtbh_policy?.enabled);
+  const enabledRouters = (routers.data ?? []).filter((r) => r.enabled);
   const [target, setTarget] = useState(initial);
-  const [strategy, setStrategy] = useState("rtbh_upstream");
+  const [strategy, setStrategy] = useState(initialStrategy);
   const [chosen, setChosen] = useState<number[] | null>(null);
+  const [chosenRouters, setChosenRouters] = useState<number[] | null>(null);
+  const [filters, setFilters] = useState<FilterMatch[] | null>(null);   // null: derive from the attack
   const [minutes, setMinutes] = useState("60");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const key = useRef(idempotencyKey());
+  const keepPlan = useRef(false);
   const sel = chosen ?? usable.map((u) => u.id);
+  const rsel = chosenRouters ?? enabledRouters.map((r) => r.id);
+  const filtering = strategy === "local_filter";
   const body = () => ({ target: target.trim(), strategy, incident_id: incidentId ?? null, duration_minutes: Number(minutes) || null,
-    upstream_ids: strategy === "rtbh_upstream" ? sel : null });
+    upstream_ids: strategy === "rtbh_upstream" ? sel : null,
+    router_ids: filtering ? rsel : null, filters: filtering ? filters : null });
 
-  useEffect(() => { setPlan(null); key.current = idempotencyKey(); }, [target, strategy, chosen, minutes]);
+  useEffect(() => {
+    if (keepPlan.current) { keepPlan.current = false; return; }
+    setPlan(null); key.current = idempotencyKey();
+  }, [target, strategy, chosen, chosenRouters, filters, minutes]);
 
   const preview = async () => {
     setErr(null); setBusy(true);
-    try { setPlan(await api<Plan>("/mitigation/preview", { method: "POST", body: body() })); }
+    try {
+      const p = await api<Plan>("/mitigation/preview", { method: "POST", body: body() });
+      setPlan(p);
+      if (filtering && filters === null && p.routes[0]?.filters?.length) {
+        // Show what Shield derived from the attack, so it can be edited; keep the plan for these exact rules.
+        keepPlan.current = true;
+        setFilters(p.routes[0].filters);
+      }
+    }
     catch (e) { setErr(errText(e)); } finally { setBusy(false); }
   };
   const submit = async () => {
@@ -212,23 +281,41 @@ export function NewMitigationDialog({ target: initial = "", incidentId, onClose,
     } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
   };
   return (
-    <Dialog open title="Blackhole an address" onClose={onClose}
+    <Dialog open title={filtering ? "Filter attack traffic" : "Blackhole an address"} onClose={onClose}
       footer={<>
         <Button variant="quiet" onClick={onClose}>Cancel</Button>
         <Button onClick={preview} disabled={busy || !target.trim()}>Preview</Button>
         <Button variant="primary" onClick={submit} disabled={busy || !plan || plan.blocked}>Propose for approval</Button>
       </>}>
-      <SimulationBanner />
+      {filtering ? <FilterBanner /> : <SimulationBanner />}
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Target" hint="An address (becomes /32 or /128)"><Input value={target} onChange={(e) => setTarget(e.target.value)} placeholder="163.5.191.20" /></Field>
-        <Field label="Where to drop it"><Select value={strategy} onChange={setStrategy}
-          options={[["rtbh_upstream", "At the upstream providers"], ["rtbh_internal", "At my own edge routers"]]} /></Field>
+        <Field label="How"><Select value={strategy} onChange={setStrategy}
+          options={[["rtbh_upstream", "Blackhole at the upstream providers"], ["rtbh_internal", "Blackhole at my own edge routers"],
+                    ["local_filter", "Filter only the attack traffic"]]} /></Field>
         {strategy === "rtbh_upstream" && <div className="sm:col-span-2">
           <div className="mb-1 text-sm font-medium">Upstreams</div>
           {usable.length ? <div className="flex flex-wrap gap-x-5 gap-y-2">{usable.map((u) => (
             <Check key={u.id} label={`${u.name} (AS${u.asn})`} checked={sel.includes(u.id)}
               onChange={(v) => setChosen(v ? [...sel, u.id] : sel.filter((x) => x !== u.id))} />))}</div>
             : <p className="text-sm text-ink-2">No upstream has an enabled, verified blackhole policy. Set one up under Routers & upstreams.</p>}
+        </div>}
+        {filtering && <div className="space-y-3 sm:col-span-2">
+          <div>
+            <div className="mb-1 text-sm font-medium">Routers</div>
+            {enabledRouters.length ? <div className="flex flex-wrap gap-x-5 gap-y-2">{enabledRouters.map((r) => (
+              <Check key={r.id} label={r.name + (r.has_filter_password ? "" : " (no filter account)")} checked={rsel.includes(r.id)}
+                onChange={(v) => setChosenRouters(v ? [...rsel, r.id] : rsel.filter((x) => x !== r.id))} />))}</div>
+              : <p className="text-sm text-ink-2">No router yet. Add your edge router under Routers & upstreams.</p>}
+          </div>
+          <div>
+            <div className="mb-1 text-sm font-medium">What to drop</div>
+            {filters === null
+              ? <p className="text-sm text-ink-2">{incidentId ? "Preview to see the filters Shield suggests for this attack; you can change them."
+                  : "Add the traffic to drop, e.g. UDP from port 123 for an NTP reflection attack."}
+                  {!incidentId && <> <Button variant="quiet" onClick={() => setFilters([{ protocol: "udp", src_port: null, dst_port: null, fragment: false }])}><Plus size={15} /> Add a filter</Button></>}</p>
+              : <FilterEditor rows={filters} onChange={setFilters} />}
+          </div>
         </div>}
         <Field label="Duration (minutes)" hint="Extended automatically while the attack continues"><Input inputMode="numeric" value={minutes} onChange={(e) => setMinutes(e.target.value)} /></Field>
       </div>
@@ -280,7 +367,7 @@ export function MitigationCenter() {
   const rowCols = (extra: any[]) => [
     { key: "t", header: "Target", render: (g: GroupRow) => <><div className="font-mono text-[13.5px] font-medium">{g.actions[0].target}</div>
       <div className="text-xs text-ink-3">{g.actions[0].automatic ? "Proposed by policy" : `Proposed by ${g.actions[0].requested_by ?? "–"}`}, {dateTime(g.actions[0].created_at)}</div></> },
-    { key: "w", header: "Where", render: (g: GroupRow) => g.actions.map((a) => a.upstream ?? "Own edge routers").join(", ") },
+    { key: "w", header: "Where", render: (g: GroupRow) => g.actions.map(whereOf).join(", ") },
     { key: "s", header: "State", render: (g: GroupRow) => <GroupState g={g} /> },
     ...extra,
   ];
@@ -366,7 +453,7 @@ export function ActionDetail() {
   return (
     <div className="space-y-5">
       <Link to="/mitigation" className="inline-flex items-center gap-1 text-sm text-ink-2 hover:text-ink"><ArrowLeft size={15} /> Mitigation center</Link>
-      <PageHeader title={`Blackhole ${a.target}`}
+      <PageHeader title={a.strategy === "local_filter" ? `Filter attack traffic to ${a.target}` : `Blackhole ${a.target}`}
         description={<>{a.automatic ? "Proposed by a policy" : `Proposed by ${a.requested_by ?? "–"}`} {dateTime(a.created_at)}
           {a.approved_by ? `, approved by ${a.approved_by}` : a.approved_at ? ", approved by policy" : ""}
           {a.incident_id && <> for <Link className="text-signal hover:underline" to={`/attacks/${a.incident_id}`}>this attack</Link></>}.</>}
@@ -377,12 +464,26 @@ export function ActionDetail() {
           {a.state === "active" && can("mitigation_approve") && <Button onClick={() => setExtend(true)}>Extend</Button>}
           {anyActive && can("mitigation_withdraw") && <Button onClick={() => act(() => api(`/mitigation/actions/${a.id}/withdraw?whole_group=true`, { method: "POST", body: { reason: "withdrawn by operator" } }))}><Undo2 size={16} /> Withdraw</Button>}
         </>} />
-      <SimulationBanner />
+      {a.strategy === "local_filter" ? <FilterBanner /> : <SimulationBanner />}
       <ErrorLine error={err} />
-      <Section title="Routes" flush>
+      {a.strategy === "local_filter" && (
+        <Section title="Drop rules on the router" flush aside={a.filters.some((f) => f.counted_at) ? "Counters from the router" : undefined}>
+          <Table rows={a.filters} rowKey={(f) => String(f.id)} empty="Rules are created when the action runs."
+            cols={[
+              { key: "d", header: "Drops", render: (f) => <><div>{f.description}</div><div className="font-mono text-xs text-ink-3">{f.comment}</div></> },
+              { key: "r", header: "Router", render: (f) => f.router ?? a.router ?? "–" },
+              { key: "s", header: "State", render: (f) => <Badge tone={f.status === "active" ? "signal" : f.status === "failed" ? "attack" : "neutral"}>
+                {({ pending: "Being added", active: f.backend === "simulated" ? "Active (simulated)" : "Active on router", removing: "Being removed", removed: "Removed", failed: "Failed" } as Record<string, string>)[f.status] ?? f.status}</Badge> },
+              { key: "p", header: "Dropped so far", align: "right", render: (f) => f.packets != null
+                  ? <><div>{f.packets.toLocaleString()} packets</div><div className="text-xs text-ink-3">{bps((f.bytes ?? 0) * 8).replace("/s", "")} · {f.counted_at ? dateTime(f.counted_at) : ""}</div></>
+                  : <span className="text-ink-3">–</span> },
+            ]} />
+        </Section>
+      )}
+      <Section title={a.strategy === "local_filter" ? "Routers" : "Routes"} flush>
         <Table rows={a.group} rowKey={(x) => x.id}
           cols={[
-            { key: "w", header: "Where", render: (x) => <><div className="font-medium">{x.upstream ?? "Own edge routers"}</div>
+            { key: "w", header: "Where", render: (x) => <><div className="font-medium">{whereOf(x)}</div>
               <div className="font-mono text-xs text-ink-2">{x.route?.description}</div></> },
             { key: "s", header: "State", render: (x) => <><Badge tone={ACTION_TONE[x.state]}>{ACTION_WORD[x.state] ?? x.state}</Badge>
               {x.error && <div className="mt-1 text-xs text-attack">{x.error}</div>}</> },
@@ -402,8 +503,8 @@ export function ActionDetail() {
           {a.events.map((e, n) => (
             <li key={n} className="grid gap-x-3 px-4 py-2 text-sm sm:grid-cols-[190px_150px_1fr]">
               <span className="whitespace-nowrap text-ink-2">{dateTime(e.at)}</span>
-              <span className="text-ink-2">{a.group.find((x) => x.id === e.action_id)?.upstream ?? (a.group.length > 1 ? "" : "Own edge routers")}</span>
-              <div><span className="font-medium">{EVENT_WORD[e.detail.kind] ?? e.detail.kind}</span>
+              <span className="text-ink-2">{(() => { const x = a.group.find((y) => y.id === e.action_id); return x ? whereOf(x) : ""; })()}</span>
+              <div><span className="font-medium">{(a.strategy === "local_filter" && FILTER_EVENT_WORD[e.detail.kind]) || EVENT_WORD[e.detail.kind] || e.detail.kind}</span>
                 {e.actor !== "controller" && <span className="text-ink-2"> by {e.actor}</span>}
                 {(e.detail.reason || e.detail.error || e.detail.reasons || e.detail.until) && <p className="mt-0.5 text-ink-2">
                   {e.detail.reason ?? e.detail.error ?? (e.detail.reasons ?? []).join("; ") ?? ""}{e.detail.until ? `until ${dateTime(e.detail.until)} (${e.detail.why})` : ""}</p>}
@@ -508,7 +609,7 @@ export function Policies() {
             { key: "s", header: "Applies to", render: (x) => <><span className="font-mono text-[13px]">{x.scope}</span>
               <div className="text-xs text-ink-3">{x.vectors.length ? x.vectors.map(vectorName).join(", ") : "any attack type"}</div></> },
             { key: "w", header: "When", render: (x) => `confidence ${Math.round(x.min_confidence * 100)}%+, confirmed for ${Math.round(x.min_duration_seconds / 60)} min` },
-            { key: "a", header: "Action", render: (x) => <>{x.allowed_strategies.map((s) => s === "rtbh_upstream" ? "Upstream blackhole" : "Internal blackhole").join(", ")}
+            { key: "a", header: "Action", render: (x) => <>{x.allowed_strategies.map((s) => ({ rtbh_upstream: "Upstream blackhole", rtbh_internal: "Internal blackhole", local_filter: "Filter on router" } as Record<string, string>)[s] ?? s).join(", ")}
               <div className="text-xs text-ink-3">{Math.round(x.mitigation_duration_seconds / 60)} min, at most {x.max_concurrent_actions} at once</div></> },
             { key: "e", header: "State", render: (x) => !x.enabled ? <span className="text-ink-3">Off</span>
               : x.requires_approval ? <Badge tone="signal">Proposes for approval</Badge> : <Badge tone="warn">Acts without approval</Badge> },
@@ -554,7 +655,7 @@ function PolicyDialog({ policy, onClose, onDone }: { policy: Policy | null; onCl
           <Input value={f.vectors} onChange={(e) => set("vectors", e.target.value)} /></Field></div>
         <Field label="Minimum confidence (%)"><Input inputMode="numeric" value={f.min_confidence} onChange={(e) => set("min_confidence", e.target.value)} /></Field>
         <Field label="Confirmed for at least (min)"><Input inputMode="numeric" value={f.min_duration} onChange={(e) => set("min_duration", e.target.value)} /></Field>
-        <Field label="Action"><Select value={f.strategy} onChange={(v) => set("strategy", v)} options={[["rtbh_upstream", "Upstream blackhole"], ["rtbh_internal", "Internal blackhole"]]} /></Field>
+        <Field label="Action"><Select value={f.strategy} onChange={(v) => set("strategy", v)} options={[["local_filter", "Filter the attack traffic on my routers"], ["rtbh_upstream", "Upstream blackhole"], ["rtbh_internal", "Internal blackhole"]]} /></Field>
         <Field label="Duration (min)"><Input inputMode="numeric" value={f.duration} onChange={(e) => set("duration", e.target.value)} /></Field>
         <Field label="Keep at least (min)" hint="Never withdrawn automatically before this"><Input inputMode="numeric" value={f.hold} onChange={(e) => set("hold", e.target.value)} /></Field>
         <Field label="At most at once"><Input inputMode="numeric" value={f.max} onChange={(e) => set("max", e.target.value)} /></Field>
@@ -572,11 +673,12 @@ function PolicyDialog({ policy, onClose, onDone }: { policy: Policy | null; onCl
 }
 
 // ---------------------------------------------------------------- on the attack page
-export function IncidentMitigation({ incidentId, target, eligible, open }: { incidentId: string; target: string; eligible: boolean; open: boolean }) {
+export function IncidentMitigation({ incidentId, target, eligible, filterEligible = false, open }:
+  { incidentId: string; target: string; eligible: boolean; filterEligible?: boolean; open: boolean }) {
   const { can } = useAuth();
   const nav = useNavigate();
   const acts = useApi<Action[]>(`/mitigation/actions?state=all&incident_id=${incidentId}`, 10_000);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<string | null>(null);
   useMitigationEvents(() => acts.reload());
   const rows = grouped(acts.data ?? []);
   return (
@@ -584,12 +686,15 @@ export function IncidentMitigation({ incidentId, target, eligible, open }: { inc
       {rows.length > 0 && <ul className="divide-y divide-rule-soft rounded-[3px] border border-rule-soft">
         {rows.map((g) => (
           <li key={g.key}><button className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-sunk" onClick={() => nav(`/mitigation/${g.actions[0].id}`)}>
-            <span><ShieldBan size={14} className="mr-1.5 inline" />{g.actions.map((a) => a.upstream ?? "Own edge routers").join(", ")}</span>
+            <span><ShieldBan size={14} className="mr-1.5 inline" />{g.actions.map(whereOf).join(", ")}</span>
             <GroupState g={g} /></button></li>))}
       </ul>}
-      {open && eligible && can("mitigation_propose") && !rows.some((g) => g.actions.some((a) => ["proposed", "approved", "executing", "active", "withdrawing"].includes(a.state))) &&
-        <Button onClick={() => setCreating(true)}><ShieldBan size={16} /> Blackhole this address</Button>}
-      {creating && <NewMitigationDialog target={target.replace(/\/(32|128)$/, "")} incidentId={incidentId} onClose={() => setCreating(false)}
+      {open && can("mitigation_propose") && !rows.some((g) => g.actions.some((a) => ["proposed", "approved", "executing", "active", "withdrawing"].includes(a.state))) &&
+        <div className="flex flex-wrap gap-2">
+          {filterEligible && <Button variant="primary" onClick={() => setCreating("local_filter")}><Filter size={16} /> Filter the attack traffic</Button>}
+          {eligible && <Button onClick={() => setCreating("rtbh_upstream")}><ShieldBan size={16} /> Blackhole this address</Button>}
+        </div>}
+      {creating && <NewMitigationDialog target={target.replace(/\/(32|128)$/, "")} incidentId={incidentId} initialStrategy={creating} onClose={() => setCreating(null)}
         onDone={(a) => { acts.reload(); if (a[0]) nav(`/mitigation/${a[0].id}`); }} />}
     </div>
   );
