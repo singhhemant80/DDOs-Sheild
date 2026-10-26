@@ -25,8 +25,9 @@ MGMT_NETS=${SHIELD_MGMT_NETS:-"10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"}
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 die()  { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
-as()   { local u=$1; shift; runuser -u "$u" -- "$@"; }
+as()   { local u=$1; shift; (cd / && runuser -u "$u" -- "$@"); }  # cd /: other users cannot enter /root
 rand() { openssl rand -hex "${1:-24}"; }
+version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]; }  # is $1 >= $2
 
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
 { command -v systemctl >/dev/null && [ -d /run/systemd/system ]; } || die "systemd is required"
@@ -160,12 +161,20 @@ note "schema up to date"
 # ---------------------------------------------------------------- Redis
 say "Redis (localhost only, password required)"
 RCONF=/etc/redis/redis.conf; [ -f "$RCONF" ] || RCONF=/etc/redis.conf
-if [ -n "$NEW_REDIS_PW" ]; then
-  sed -i -e '/^#\? *requirepass /d' -e 's/^bind .*/bind 127.0.0.1 -::1/' "$RCONF"
-  echo "requirepass $NEW_REDIS_PW" >> "$RCONF"
-fi
+# IPv4 loopback only. This form works on every Redis version (Redis 6.0 on Ubuntu 22.04 rejects
+# the "-::1" syntax) and on hosts with IPv6 disabled. Rewritten on every run, so a broken line
+# left by an earlier installer is repaired.
+REDIS_PW=$(sed -n 's/^SHIELD_REDIS_PASSWORD=//p' "$ETC/collector.env")
+[ -n "$REDIS_PW" ] || die "no Redis password in $ETC/collector.env"
+sed -i -e '/^#\? *requirepass /d' -e '/^bind /d' "$RCONF"
+printf 'bind 127.0.0.1\nrequirepass %s\n' "$REDIS_PW" >> "$RCONF"
 systemctl enable "$REDIS_UNIT" >/dev/null 2>&1
-systemctl restart "$REDIS_UNIT"
+if ! systemctl restart "$REDIS_UNIT"; then
+  journalctl -u "$REDIS_UNIT" -n 25 --no-pager >&2 || true
+  die "Redis did not start; its log is above ($RCONF)"
+fi
+redis-cli -a "$REDIS_PW" --no-auth-warning ping 2>/dev/null | grep -q PONG || die "Redis started but does not answer on 127.0.0.1:6379"
+note "Redis $(redis-server --version | sed -n 's/.*v=\([0-9.]*\).*/\1/p') listening on 127.0.0.1 with a password"
 
 # ---------------------------------------------------------------- ClickHouse
 say "ClickHouse"
@@ -232,6 +241,13 @@ if [ ! -f "$NGINX_SITE" ] || grep -q 'managed-by: crapplet-shield-installer' "$N
   allow=""
   for n in $MGMT_NETS; do allow="${allow}    allow $n;\n"; done
   sed -e "s|@ALLOW@|$allow|" "$PREFIX/deploy/nginx/crapplet-shield.conf.tmpl" > "$NGINX_SITE"
+  # nginx before 1.25.1 (Ubuntu 22.04: 1.18, Debian 12: 1.22) has no "http2 on;" directive.
+  NGINX_VER=$(nginx -v 2>&1 | sed -n 's|.*nginx/\([0-9.]*\).*|\1|p')
+  if [ -n "$NGINX_VER" ] && ! version_ge "$NGINX_VER" 1.25.1; then
+    sed -i -e '/^ *http2 on;/d' -e 's/^\( *listen .*443 ssl\);/\1 http2;/' "$NGINX_SITE"
+  fi
+  # Hosts with IPv6 switched off cannot bind [::].
+  if [ ! -s /proc/net/if_inet6 ]; then sed -i '/^ *listen \[::\]/d' "$NGINX_SITE"; fi
   if [ -n "$NGINX_LINK" ]; then ln -sf "$NGINX_SITE" "$NGINX_LINK"; fi
 fi
 if ! nginx -t >/dev/null 2>&1; then nginx -t; die "nginx configuration test failed"; fi
