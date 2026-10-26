@@ -4,6 +4,7 @@ import { LiveChart } from "../components/LiveChart";
 import { Num, ProvLegend, ProvTag } from "../components/Provenance";
 import { Badge, Notice, Section, Select, Table } from "../components/ui";
 import { useApi, useLiveTraffic, type Dst } from "../lib/hooks";
+import { useAttackedTargets, useLive, vectorName } from "../lib/live";
 import { ago, bps, count, pct, pps } from "../lib/format";
 import { InterfaceList, type Iface } from "./shared";
 
@@ -38,9 +39,19 @@ export function Overview() {
   }, [live.history, metric]);
 
   const saturated = (ifaces.data?.interfaces ?? []).filter((i) => i.saturated);
+  const { incidents } = useLive();
+  const confirmedAttacks = incidents.filter((i) => i.status !== "suspected");
+  const suspectedCount = incidents.length - confirmedAttacks.length;
 
   return (
     <div className="space-y-5">
+      {confirmedAttacks.length > 0 && (
+        <Link to="/attacks" className="block rounded-[3px] border border-attack bg-attack-soft px-4 py-3 text-attack hover:brightness-[0.98]">
+          <strong>{confirmedAttacks.length} attack{confirmedAttacks.length === 1 ? "" : "s"} under way:</strong>{" "}
+          {confirmedAttacks.slice(0, 3).map((i) => `${i.target.replace(/\/(32|128)$/, "")} (${vectorName(i.vectors[0] ?? "")}, ${pps(i.current?.pps ?? i.peak_pps)})`).join("; ")}
+          {confirmedAttacks.length > 3 && ` and ${confirmedAttacks.length - 3} more`}. Open active attacks.
+        </Link>
+      )}
       {saturated.map((i) => (
         <Notice key={`${i.agent}|${i.if_index}`} tone="attack">
           <strong>{i.upstream ?? i.if_name ?? `ifIndex ${i.if_index}`} is at {pct(i.in_util)} of capacity.</strong>{" "}
@@ -107,7 +118,9 @@ export function Overview() {
         </Section>
         <Section title="Protection status" flush>
           <ul className="divide-y divide-rule-soft text-sm">
-            <li className="flex justify-between px-4 py-2.5"><span>Active attacks</span><Badge>Detection arrives in phase 4</Badge></li>
+            <li className="flex justify-between px-4 py-2.5"><span>Active attacks</span>
+              <Link to="/attacks">{confirmedAttacks.length ? <Badge tone="attack">{confirmedAttacks.length} confirmed</Badge>
+                : suspectedCount ? <Badge tone="warn">{suspectedCount} suspected</Badge> : <Badge tone="ok">None</Badge>}</Link></li>
             <li className="flex justify-between px-4 py-2.5"><span>Blackhole routes</span><Badge>0 announced</Badge></li>
             <li className="flex justify-between px-4 py-2.5"><span>BGP sessions</span><Link to="/bgp" className="text-signal hover:underline">View sessions</Link></li>
             {(prefixes.data ?? []).map((p) => (
@@ -131,11 +144,22 @@ export function LiveState({ state, reason, ts }: { state: string; reason: string
 }
 
 export function TopDsts({ rows, onPick }: { rows: Dst[]; onPick?: (d: Dst) => void }) {
+  const attacked = useAttackedTargets();
   return (
     <Table dense rows={rows} rowKey={(r) => r.ip} onRow={onPick}
       empty="No traffic to protected destinations in the last second."
       cols={[
-        { key: "ip", header: "Destination", render: (r) => <div><div className="font-medium">{r.ip}</div><div className="text-xs text-ink-3">{r.prefix}</div></div> },
+        { key: "ip", header: "Destination", render: (r) => {
+          const inc = attacked.get(r.ip);
+          return (
+            <div>
+              <div className="font-medium">{r.ip}{" "}
+                {inc && <Link to={`/attacks/${inc.id}`} onClick={(e) => e.stopPropagation()}>
+                  <Badge tone={inc.status === "suspected" ? "warn" : "attack"}>{inc.status === "suspected" ? "Suspected" : "Under attack"}</Badge></Link>}
+              </div>
+              <div className="text-xs text-ink-3">{r.prefix}</div>
+            </div>);
+        } },
         { key: "pps", header: "Packets/s", align: "right", render: (r) => <Num v={r.pps} p={r.provenance} fmt={pps} /> },
         { key: "bps", header: "Bits/s", align: "right", render: (r) => <Num v={r.bps} p={r.provenance} fmt={bps} /> },
         { key: "mix", header: "Protocol mix", render: (r) => <Mix d={r} /> },

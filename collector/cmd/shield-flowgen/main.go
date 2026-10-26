@@ -35,6 +35,8 @@ var scenarios = map[string]scenario{
 	"dns-reflect": {name: "dns-reflect", baseline: 20_000, attack: 300_000, kind: "dns", sources: 2500, pktSize: 1400},
 	"icmp-flood":  {name: "icmp-flood", baseline: 20_000, attack: 300_000, kind: "icmp", sources: 2000, pktSize: 98},
 	"frag-flood":  {name: "frag-flood", baseline: 20_000, attack: 200_000, kind: "frag", sources: 1000, pktSize: 1480},
+	// Carpet bombing: the attack is spread over 200 addresses, each below the per-address thresholds.
+	"carpet": {name: "carpet", baseline: 20_000, attack: 1_000_000, kind: "carpet", sources: 5000, pktSize: 512},
 	// A legitimate spike: many real clients, normal TCP mix, to exercise false-positive handling (Phase 4).
 	"flash-crowd": {name: "flash-crowd", baseline: 20_000, attack: 150_000, kind: "web", sources: 15000, pktSize: 900},
 }
@@ -177,11 +179,17 @@ func secondOfTraffic(rng *rand.Rand, sc scenario, pfx netip.Prefix, victim netip
 	}
 	// Attack: split across a sample of sources so per-flow sampled counts stay realistic.
 	srcs := min(sc.sources, 400)
+	spread := hostsIn(pfx, 200)
 	per := sc.attack / float64(srcs)
 	for i := 0; i < srcs; i++ {
 		src := randAddr(rng, 0, sc.sources)
 		f := encode.Flow{Src: src, Dst: victim, DurationMs: 1000}
+		if sc.kind == "carpet" {
+			f.Dst = spread[i%len(spread)]
+		}
 		switch sc.kind {
+		case "carpet":
+			f.Proto, f.SrcPort, f.DstPort = 17, uint16(1024+rng.Intn(60000)), uint16(1+rng.Intn(65535))
 		case "udp":
 			f.Proto, f.SrcPort, f.DstPort = 17, uint16(1024+rng.Intn(60000)), uint16(1+rng.Intn(65535))
 		case "syn":

@@ -190,6 +190,12 @@ def test_single_big_target_is_not_reported_as_carpet_bombing():
     assert {e.key for e in evs if e.kind == "confirmed"} == {VKEY}
 
 
+def test_several_host_attacks_in_one_prefix_are_not_carpet_bombing():
+    eng = engine()
+    evs = run(eng, 25, T0, lambda i: [dst(f"163.5.191.{n}", 400_000) for n in (20, 21, 22, 23)])
+    assert {e.key for e in evs if e.kind == "confirmed"} == {f"163.5.191.{n}/32" for n in (20, 21, 22, 23)}
+
+
 # ---------------------------------------------------------------- profiles
 def test_most_specific_profile_and_customer_override():
     vps = Profile(id=7, name="VPS block", scope=ipaddress.ip_network("163.5.191.0/24"), dst_pps=50_000, dst_bps=None,

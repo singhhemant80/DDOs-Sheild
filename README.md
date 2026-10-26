@@ -4,11 +4,11 @@ On-premises DDoS detection and mitigation platform for hosting providers, ISPs a
 data centres: flow-based detection, BGP RTBH (upstream and internal), MikroTik
 RouterOS v7 integration, multi-upstream steering, and an operator dashboard.
 
-> **Status: Phase 3 of 10.** Design (Phase 1), foundational backend (Phase 2), and live traffic
-> (Phase 3): a dependency-free Go flow collector for NetFlow v9 / IPFIX / sFlow, SNMP interface
-> polling, ClickHouse history, and the operations dashboard with live streaming charts.
-> **Nothing in this release talks to a router's configuration or announces a BGP route.**
-> See [docs/roadmap.md](docs/roadmap.md).
+> **Status: Phase 4 of 10.** Design, foundational backend, live traffic (Go flow collector for
+> NetFlow v9 / IPFIX / sFlow, ClickHouse history, live dashboard) and **attack detection**
+> (classification of floods and reflection attacks, confirmed vs suspected, incidents with
+> evidence). **Nothing in this release changes router configuration or announces a BGP route.**
+> See [docs/roadmap.md](docs/roadmap.md) and [docs/detection.md](docs/detection.md).
 
 ## Install
 
@@ -35,8 +35,8 @@ All options are listed at the top of [install.sh](install.sh). Then point your r
 
 | Path | Contents |
 |---|---|
-| `docs/` | Architecture, network topology, threat model, tech stack, roadmap, API notes |
-| `backend/` | Python FastAPI management API, SQLAlchemy models, Alembic migrations, tests |
+| `docs/` | Architecture, network topology, threat model, tech stack, roadmap, API notes, collector and detection guides |
+| `backend/` | Python FastAPI management API, attack detector (`app/detector`), models, migrations, tests |
 | `collector/` | Go: flow collector, SNMP poller, lab flow generator, ClickHouse schema ([docs/collector.md](docs/collector.md)) |
 | `frontend/` | React + TypeScript dashboard (Vite, Tailwind, uPlot), fonts self-hosted |
 | `config/` | Example network inventory (AS154950 lab values — examples only) |

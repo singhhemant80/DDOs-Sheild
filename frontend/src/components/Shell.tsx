@@ -7,6 +7,7 @@ import {
 import { useAuth } from "../lib/auth";
 import { api } from "../lib/api";
 import { useApi } from "../lib/hooks";
+import { useLive } from "../lib/live";
 import { ago } from "../lib/format";
 import { Button, Dialog, Lamp, Notice } from "./ui";
 
@@ -18,8 +19,8 @@ export const NAV: { group: string; items: Item[] }[] = [
     { to: "/", label: "Overview", icon: <Gauge size={17} /> },
     { to: "/traffic", label: "Live traffic", icon: <Activity size={17} /> },
     { to: "/analytics", label: "Traffic analytics", icon: <BarChart3 size={17} /> },
-    { to: "/attacks", label: "Active attacks", icon: <ShieldAlert size={17} />, phase: 4 },
-    { to: "/history", label: "Attack history", icon: <History size={17} />, phase: 4 },
+    { to: "/attacks", label: "Active attacks", icon: <ShieldAlert size={17} /> },
+    { to: "/history", label: "Attack history", icon: <History size={17} /> },
   ] },
   { group: "Mitigate", items: [
     { to: "/mitigation", label: "Mitigation center", icon: <Swords size={17} />, phase: 6 },
@@ -84,8 +85,16 @@ function StatusStrip() {
     } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
 
+  const { incidents } = useLive();
+  const confirmed = incidents.filter((i) => i.status !== "suspected").length;
+  const suspected = incidents.length - confirmed;
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-rule bg-panel px-5 py-2 text-sm">
+      <NavLink to="/attacks" className="hover:underline">
+        <Lamp tone={confirmed ? "attack" : suspected ? "warn" : "ok"} label={
+          confirmed ? <strong className="text-attack">{confirmed} attack{confirmed === 1 ? "" : "s"} under way{suspected ? `, ${suspected} suspected` : ""}</strong>
+            : suspected ? <>{suspected} suspected, none confirmed</> : "No attacks"} />
+      </NavLink>
       <Lamp tone={collTone as any} label={
         <>Flow collector {c.collector === "up" ? `receiving (${ago(lastSeen)})` : c.collector === "degraded" ? "running, no exporters sending" : "not running"}</>
       } />
@@ -121,6 +130,8 @@ function StatusStrip() {
 
 export function Shell() {
   const [open, setOpen] = useState(false);
+  const { incidents } = useLive();
+  const confirmed = incidents.filter((i) => i.status !== "suspected").length;
   return (
     <div className="flex min-h-full">
       <nav aria-label="Main"
@@ -148,6 +159,9 @@ export function Shell() {
                     {it.icon}
                     <span className="flex-1">{it.label}</span>
                     {it.phase && <span className="text-[11px] text-ink-3" title={`Arrives in phase ${it.phase}`}>P{it.phase}</span>}
+                    {it.to === "/attacks" && incidents.length > 0 && (
+                      <span className={`min-w-5 rounded-full px-1.5 text-center text-xs font-semibold text-white ${confirmed ? "bg-attack" : "bg-warn"}`}
+                        aria-label={`${incidents.length} open`}>{incidents.length}</span>)}
                   </NavLink>
                 </li>
               ))}

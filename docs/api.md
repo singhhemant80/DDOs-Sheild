@@ -1,4 +1,4 @@
-# API Guide (v1, Phase 3)
+# API Guide (v1, Phase 4)
 
 Interactive OpenAPI: `/api/v1/docs` (non-production, or `SHIELD_EXPOSE_DOCS=true`).
 Raw spec: `/api/v1/openapi.json`.
@@ -37,7 +37,10 @@ disabling a user revokes sessions immediately.
 | Settings | `GET /settings`, `PUT /settings/{key}` | Admin |
 | Safety | `POST /system/emergency-stop` (NOC+), `POST /system/automation?enabled=` (Engineer+) | |
 | Traffic | `GET /traffic/live`, `/traffic/history`, `/traffic/totals`, `/traffic/top`, `/traffic/destinations/{ip}`, `/traffic/interfaces`, `/collector/status` | read-only |
-| Live stream | WebSocket `/ws/traffic` | read-only |
+| Live stream | WebSocket `/ws/traffic` (traffic every second + incident events) | read-only |
+| Attacks | `GET /attacks?state=open\|closed\|all&severity=&q=&confirmed_only=`, `/attacks/summary`, `/attacks/{id}`, `/attacks/{id}/series` | read-only |
+| Attack actions | `POST /attacks/{id}/acknowledge`, `/attacks/{id}/false-positive` (`{"note": "..."}`), `/attacks/{id}/notes` | NOC operator |
+| Detection | `GET/POST /detection/profiles`, `PUT/DELETE /detection/profiles/{id}`, `GET /detection/status` | Network engineer (profiles) |
 
 ## Live traffic WebSocket
 
@@ -94,6 +97,6 @@ Lowering it (e.g. to /24) is an explicit, audited decision.
 
 ## Coming in later phases
 
-`/attacks`, `/mitigation` (preview / approve / reject / withdraw with `Idempotency-Key`),
-`/rtbh` (active routes, verify), `/policies`, `/notifications`, and incident events on the WebSocket.
+`/mitigation` (preview / approve / reject / withdraw with `Idempotency-Key`),
+`/rtbh` (active routes, verify), `/policies`, `/notifications`.
 The database tables for these already exist (see `backend/app/models.py`).

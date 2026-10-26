@@ -9,6 +9,8 @@ import { Overview } from "./pages/Overview";
 import { Analytics, LiveTraffic } from "./pages/Traffic";
 import { Bgp, Customers, Prefixes, Routers } from "./pages/Network";
 import { AuditLog, HealthPage, SettingsPage, Upcoming, Users } from "./pages/Admin";
+import { ActiveAttacks, AttackDetail, AttackHistory } from "./pages/Attacks";
+import { LiveProvider } from "./lib/live";
 
 function App() {
   const { me, ready } = useAuth();
@@ -16,17 +18,13 @@ function App() {
   if (!me) return <Login />;
   return (
     <Routes>
-      <Route element={<Shell />}>
+      <Route element={<LiveProvider><Shell /></LiveProvider>}>
         <Route index element={<Overview />} />
         <Route path="traffic" element={<LiveTraffic />} />
         <Route path="analytics" element={<Analytics />} />
-        <Route path="attacks" element={<Upcoming title="Active attacks" phase={4}>
-          <p>The detection engine will list attacks here as they happen: target, attack type, confidence, rate, start time and mitigation status.</p>
-          <p className="text-ink-2">It will separate suspected from confirmed attacks and learn per-destination baselines, so a busy but normal hour doesn't raise an alarm.</p>
-        </Upcoming>} />
-        <Route path="history" element={<Upcoming title="Attack history" phase={4}>
-          <p>Every past incident with its evidence, timeline and the actions taken, searchable by target and customer.</p>
-        </Upcoming>} />
+        <Route path="attacks" element={<ActiveAttacks />} />
+        <Route path="attacks/:id" element={<AttackDetail />} />
+        <Route path="history" element={<AttackHistory />} />
         <Route path="mitigation" element={<Upcoming title="Mitigation center" phase={6}>
           <p>Proposed actions with a preview of exactly what changes and who is affected, approve and reject controls, and live verification of each action.</p>
           <p className="text-ink-2">Runs in simulation first; real announcements start in phase 8.</p>

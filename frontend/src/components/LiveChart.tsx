@@ -21,6 +21,7 @@ type Props = {
   windowSec?: number;      // fixed x-range ending now (live charts); otherwise fit data
   gapSec?: number;         // a gap longer than this is drawn as hatched "no data"
   ariaLabel: string;
+  markers?: { ts: number; label: string; color: string }[];  // vertical event lines
 };
 
 const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";
@@ -30,11 +31,11 @@ const css = (name: string) => getComputedStyle(document.documentElement).getProp
  * a solid trace for sampled/measured points and a dashed trace for estimated points.
  * Spans without data are hatched rather than drawn at zero.
  */
-export function LiveChart({ ts, series, height = 260, format, windowSec, gapSec = 3, ariaLabel }: Props) {
+export function LiveChart({ ts, series, height = 260, format, windowSec, gapSec = 3, ariaLabel, markers }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
-  const latest = useRef({ ts, series, windowSec, gapSec });
-  latest.current = { ts, series, windowSec, gapSec };
+  const latest = useRef({ ts, series, windowSec, gapSec, markers });
+  latest.current = { ts, series, windowSec, gapSec, markers };
 
   const build = () => {
     const el = host.current;
@@ -76,7 +77,7 @@ export function LiveChart({ ts, series, height = 260, format, windowSec, gapSec 
         { ...axis, space: 70 },
         { ...axis, size: 72, values: (_u, vals) => vals.map((v) => format(v)) },
       ],
-      hooks: { drawClear: [(u) => drawGaps(u)] },
+      hooks: { drawClear: [(u) => drawGaps(u)], draw: [(u) => drawMarkers(u)] },
     }, toData(), el);
   };
 
@@ -141,6 +142,35 @@ export function LiveChart({ ts, series, height = 260, format, windowSec, gapSec 
       const x0 = Math.max(left, u.valToPos(a, "x", true));
       const x1 = Math.min(left + width, u.valToPos(b, "x", true));
       if (x1 > x0) ctx.fillRect(x0, top, x1 - x0, h);
+    }
+    ctx.restore();
+  };
+
+  const drawMarkers = (u: uPlot) => {
+    const ms = latest.current.markers;
+    if (!ms?.length) return;
+    const ctx = u.ctx;
+    const { left, top, width, height: h } = u.bbox;
+    ctx.save();
+    ctx.font = `${12 * devicePixelRatio}px Archivo Variable, sans-serif`;
+    ctx.textBaseline = "top";
+    let lastRight = -Infinity;
+    let row = 0;
+    for (const m of [...ms].sort((a, b) => a.ts - b.ts)) {
+      const x = u.valToPos(m.ts, "x", true);
+      if (x < left || x > left + width) continue;
+      const c = css(m.color);
+      ctx.strokeStyle = c;
+      ctx.fillStyle = c;
+      ctx.lineWidth = 1.5 * devicePixelRatio;
+      ctx.setLineDash([4 * devicePixelRatio, 3 * devicePixelRatio]);
+      ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + h); ctx.stroke();
+      ctx.setLineDash([]);
+      const tw = ctx.measureText(m.label).width;
+      const tx = x + 4 * devicePixelRatio + tw > left + width ? x - 4 * devicePixelRatio - tw : x + 4 * devicePixelRatio;
+      row = tx < lastRight + 6 * devicePixelRatio ? row + 1 : 0;   // stack labels that would overlap
+      ctx.fillText(m.label, tx, top + (2 + row * 15) * devicePixelRatio);
+      lastRight = tx + tw;
     }
     ctx.restore();
   };

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { LiveChart } from "../components/LiveChart";
 import { Num, ProvLegend, ProvTag } from "../components/Provenance";
-import { Badge, Notice, PageHeader, Section, Select, Table } from "../components/ui";
+import { Notice, PageHeader, Section, Select, Table } from "../components/ui";
 import { useApi, useLiveTraffic, type Dst } from "../lib/hooks";
 import { bps, count, PROTO_PORTS, pps } from "../lib/format";
 import { LiveState, TopDsts } from "./Overview";
@@ -108,8 +108,8 @@ function DestinationDetail({ d, live }: { d: Dst; live: Dst | null }) {
                 { key: "n", header: "Signal", render: ([n]) => n },
                 { key: "v", header: "Rate", align: "right", render: ([, v]) => pps(v) },
               ]} />
-            <p className="mt-2 text-xs text-ink-3">Signals only describe traffic. Deciding whether it is an attack is the
-              detection engine's job (<Badge>phase 4</Badge>).</p>
+            <p className="mt-2 text-xs text-ink-3">Signals only describe traffic. The detection engine decides whether
+              it is an attack; see Active attacks.</p>
           </div>
         </div>
       </div>

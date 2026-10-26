@@ -1,0 +1,37 @@
+[Unit]
+Description=Crapplet DDoS Shield attack detector
+After=network-online.target postgresql.service redis-server.service shield-api.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=shield
+Group=shield
+WorkingDirectory=/opt/crapplet-shield/backend
+EnvironmentFile=/etc/crapplet-shield/shield.env
+ExecStart=/opt/crapplet-shield/venv/bin/python -m app.detector
+Restart=always
+RestartSec=2
+# Open incidents are resumed from the database on start, so restarts are safe.
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -74,9 +74,11 @@ def eligibility_for(db: Session, net) -> EligibilityOut:
     if cust and cust.rtbh_opt_out:
         rtbh = False
         reasons.append("Customer has opted out of RTBH.")
+    words = {"rtbh_allowed": "Blackholing", "steering_allowed": "Steering via another upstream",
+             "filtering_allowed": "Local filtering"}
     for flag in _MITIGATION_FLAGS:
         if not getattr(pp, flag):
-            reasons.append(f"{flag} is false on the protected prefix.")
+            reasons.append(f"{words[flag]} is not enabled for {pp.prefix}.")
     return EligibilityOut(
         target=str(net), protected_prefix=str(pp.prefix), protected_prefix_id=pp.id, enabled=pp.enabled,
         rtbh_allowed=rtbh, steering_allowed=pp.enabled and pp.steering_allowed,

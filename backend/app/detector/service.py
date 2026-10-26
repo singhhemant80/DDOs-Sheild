@@ -289,9 +289,9 @@ class DetectorService:
             self._evidence(db, iid, e)
 
     def _evidence(self, db: Session, iid, e: Event) -> None:
-        details = {"sample": e.sample, "breakdown": e.breakdown, "status": e.status}
-        rows = e.signals or [{"vector": "pps", "value": e.sample["pps"], "threshold": None}]
+        rows = e.signals or [{"vector": "pps", "value": e.sample["pps"], "threshold": None, "unit": "pps"}]
         for s in rows:
+            details = {"sample": e.sample, "breakdown": e.breakdown, "status": e.status, "unit": s.get("unit", "pps")}
             db.add(DetectionEvidence(incident_id=iid, observed_at=_dt(e.ts), metric=s["vector"][:32],
                                      value=s["value"], threshold=s.get("threshold"),
                                      provenance=e.sample["provenance"], source="detector", details=details))

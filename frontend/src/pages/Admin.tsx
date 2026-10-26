@@ -5,6 +5,7 @@ import { useAuth } from "../lib/auth";
 import { useApi } from "../lib/hooks";
 import { ago, dateTime } from "../lib/format";
 import { objectLabel } from "./Overview";
+import { DetectionProfiles } from "./Detection";
 import { Badge, Button, Check, Dialog, ErrorLine, Field, Input, Lamp, Notice, PageHeader, Section, Select, Table } from "../components/ui";
 
 // ================================================================ Users
@@ -126,6 +127,7 @@ export function SettingsPage() {
             : <Button variant="primary" onClick={() => automation(true)}>Turn on and allow blackholes</Button>)}
         </div>
       </Section>
+      <DetectionProfiles />
       <Section title="System" aside={can("manage_settings") ? undefined : "Read-only for your role"} flush>
         <Table rows={(s.data ?? []).filter((x) => !["automation_enabled", "rtbh_emergency_disable"].includes(x.key))} rowKey={(x) => x.key}
           cols={[
@@ -293,7 +295,7 @@ type Collector = { running: boolean; reason?: string; version?: string; started_
 const COMPONENTS: [string, string, string][] = [
   ["api", "Management API", ""], ["database", "PostgreSQL", "Configuration, users, audit"],
   ["redis", "Redis", "Live feed"], ["clickhouse", "ClickHouse", "Traffic history"],
-  ["collector", "Flow collector", "NetFlow, IPFIX, sFlow"], ["detector", "Detection engine", "Phase 4"],
+  ["collector", "Flow collector", "NetFlow, IPFIX, sFlow"], ["detector", "Detection engine", "Attack detection and incidents"],
   ["mikrotik_adapter", "MikroTik adapter", "Phase 5"], ["mitigator", "Mitigation engine", "Phase 6"],
 ];
 

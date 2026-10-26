@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { accessToken, api, ApiError } from "./api";
+import { useCallback, useEffect, useState } from "react";
+import { api, ApiError } from "./api";
 
 /** Fetch on mount and every `intervalMs` (0 = once). */
 export function useApi<T>(path: string | null, intervalMs = 0) {
@@ -46,70 +46,4 @@ export type HistoryPoint = {
 
 export type LiveState = "connecting" | "live" | "no-data" | "offline";
 
-/**
- * Live traffic over the authenticated WebSocket, seeded with the server-side history buffer.
- * Keeps `windowSec` seconds of history. Reconnects with backoff.
- */
-export function useLiveTraffic(windowSec = 300) {
-  const [latest, setLatest] = useState<Snapshot | null>(null);
-  const [history, setHistory] = useState<HistoryPoint[]>([]);
-  const [state, setState] = useState<LiveState>("connecting");
-  const [reason, setReason] = useState<string>("");
-  const histRef = useRef<HistoryPoint[]>([]);
-
-  useEffect(() => {
-    let ws: WebSocket | null = null;
-    let stopped = false;
-    let retry = 1000;
-    let timer: ReturnType<typeof setTimeout>;
-
-    api<{ points: HistoryPoint[] }>(`/traffic/history?seconds=${windowSec}`)
-      .then((h) => {
-        histRef.current = h.points;
-        setHistory(h.points);
-      })
-      .catch(() => undefined);
-
-    const connect = () => {
-      if (stopped) return;
-      setState("connecting");
-      const proto = location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(`${proto}://${location.host}/api/v1/ws/traffic`);
-      ws.onopen = () => ws?.send(JSON.stringify({ token: accessToken() }));
-      ws.onmessage = (ev) => {
-        const m = JSON.parse(ev.data);
-        if (m.type === "ready") { retry = 1000; return; }
-        if (m.type === "status") { setState("no-data"); setReason(m.reason ?? ""); return; }
-        if (m.type !== "traffic") return;
-        const s: Snapshot = m.data;
-        setState("live");
-        setLatest(s);
-        const p: HistoryPoint = {
-          ts: s.ts, in_pps: s.in.pps, in_bps: s.in.bps, out_pps: s.out.pps, out_bps: s.out.bps,
-          tcp_pps: s.in.tcp_pps, udp_pps: s.in.udp_pps, icmp_pps: s.in.icmp_pps, other_pps: s.in.other_pps,
-          provenance: s.in.provenance,
-        };
-        const h = histRef.current;
-        if (h.length && h[h.length - 1].ts >= p.ts) return;
-        const next = [...h, p].filter((x) => x.ts > p.ts - windowSec);
-        histRef.current = next;
-        setHistory(next);
-      };
-      ws.onclose = (ev) => {
-        if (stopped) return;
-        setState("offline");
-        setReason(ev.code === 4401 ? "Session ended" : "Connection to the Shield API lost");
-        timer = setTimeout(connect, retry);
-        retry = Math.min(retry * 2, 15000);
-      };
-    };
-    connect();
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-      ws?.close();
-    };
-  }, [windowSec]);
-
-  return { latest, history, state, reason };
-}
+export { useLiveTraffic } from "./live";

@@ -168,6 +168,7 @@ class Signal:
     vector: str
     value: float
     threshold: float
+    unit: str = "pps"   # "pps" or "bps"
 
     @property
     def ratio(self) -> float:
@@ -206,7 +207,7 @@ def classify(s: Sample, p: Profile, baseline: tuple[float, float] | None = None)
     if p.dst_pps and s.pps >= p.dst_pps:
         out.append(Signal("volumetric_pps", s.pps, p.dst_pps))
     if p.dst_bps and s.bps >= p.dst_bps:
-        out.append(Signal("volumetric_bps", s.bps, p.dst_bps))
+        out.append(Signal("volumetric_bps", s.bps, p.dst_bps, "bps"))
     if baseline is not None and not out:
         mean, std = baseline
         limit = max(p.anomaly_min_pps, (mean + 2.33 * std) * p.baseline_factor)
@@ -224,10 +225,10 @@ def classify_prefix(s: Sample, p: Profile) -> list[Signal]:
     if p.prefix_pps and s.pps >= p.prefix_pps:
         out.append(Signal("carpet_bombing", s.pps, p.prefix_pps))
     elif p.prefix_bps and s.bps >= p.prefix_bps:
-        out.append(Signal("carpet_bombing", s.bps, p.prefix_bps))
+        out.append(Signal("carpet_bombing", s.bps, p.prefix_bps, "bps"))
     if not out:
         return out
-    thr = out[0].threshold
+    thr = out[0].threshold if out[0].unit == "pps" else s.pps
     dom = max(s.reflect.items(), key=lambda kv: kv[1], default=(0, 0.0))
     if dom[0] in REFLECTION_VECTORS and _share(dom[1], s.pps) >= 0.5:
         out.append(Signal(REFLECTION_VECTORS[dom[0]], dom[1], thr))
@@ -430,12 +431,16 @@ class Engine:
             self._accumulate_minute(key, ts, s.pps)
             events += self._step(key, "host", d.get("prefix"), ts, s)
             pfx = d.get("prefix")
-            if pfx:
+            t = self.tracks.get(key)
+            host_hot = t is not None and bool(t.history) and t.history[-1] == (ts, True)
+            # Traffic already explained by a host-level detection is excluded from the prefix
+            # aggregate, so several separate attacks in one /24 are not also reported as carpet bombing.
+            if pfx and not host_hot:
                 agg = prefixes.setdefault(pfx, Sample(reflect={}))
                 agg.add(s)
                 tops[pfx] = max(tops.get(pfx, 0.0), s.pps)
 
-        # Prefix aggregates (carpet bombing).
+        # Prefix aggregates of the remaining traffic (carpet bombing).
         for pfx, agg in prefixes.items():
             agg.top_share = tops[pfx] / agg.pps if agg.pps else 1.0
             seen.add(pfx)
@@ -551,7 +556,7 @@ class Engine:
                      breakdown=b, sample=s.metrics(), peak_pps=t.peak_pps, peak_bps=t.peak_bps,
                      profile_id=t.profile.id,
                      signals=[{"vector": x.vector, "value": round(x.value), "threshold": round(x.threshold),
-                               "ratio": round(x.ratio, 2)} for x in signals],
+                               "ratio": round(x.ratio, 2), "unit": x.unit} for x in signals],
                      resolution=resolution, started_ts=t.started_ts, confirmed_ts=t.confirmed_ts)
 
     # --- baseline learning (per minute, never during an incident) ------------------------------

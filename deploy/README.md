@@ -35,6 +35,7 @@ ClickHouse and nginx.
 | `shield-api.service` | FastAPI on 127.0.0.1:8080 (hardened systemd sandbox) |
 | `shield-maintenance.timer` | Nightly retention purge + audit-chain verification (unit fails if the chain is broken) |
 | `shield-backup.timer` | Nightly `pg_dump` to `/var/backups/crapplet-shield`, 14-day retention, optional GPG |
+| `shield-detector.service` | Attack detection: reads the collector's live stream, writes incidents (safe to restart; open incidents resume) |
 | `shield-collector.service` | Flow collector (enabled once `/etc/crapplet-shield/collector.json` exists) |
 | `shield-snmp-poller.service` | Interface counters (enabled once `snmp-poller.json` exists) |
 
