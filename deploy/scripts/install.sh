@@ -20,7 +20,11 @@ PREFIX=/opt/crapplet-shield
 ETC=/etc/crapplet-shield
 SRC=$(cd "$(dirname "$0")/../.." && pwd)
 CREDS_FILE=/root/crapplet-shield-admin.txt
-MGMT_NETS=${SHIELD_MGMT_NETS:-"10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"}
+# The dashboard allow-list is remembered in $ETC/mgmt-nets, so a later plain upgrade keeps it.
+# Passing SHIELD_MGMT_NETS replaces it.
+if [ -n "${SHIELD_MGMT_NETS:-}" ]; then MGMT_NETS=$SHIELD_MGMT_NETS
+elif [ -s /etc/crapplet-shield/mgmt-nets ]; then MGMT_NETS=$(cat /etc/crapplet-shield/mgmt-nets)
+else MGMT_NETS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"; fi
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -240,6 +244,7 @@ fi
 if [ ! -f "$NGINX_SITE" ] || grep -q 'managed-by: crapplet-shield-installer' "$NGINX_SITE"; then
   allow=""
   for n in $MGMT_NETS; do allow="${allow}    allow $n;\n"; done
+  printf '%s\n' "$MGMT_NETS" > "$ETC/mgmt-nets"
   sed -e "s|@ALLOW@|$allow|" "$PREFIX/deploy/nginx/crapplet-shield.conf.tmpl" > "$NGINX_SITE"
   # nginx before 1.25.1 (Ubuntu 22.04: 1.18, Debian 12: 1.22) has no "http2 on;" directive.
   NGINX_VER=$(nginx -v 2>&1 | sed -n 's|.*nginx/\([0-9.]*\).*|\1|p')
