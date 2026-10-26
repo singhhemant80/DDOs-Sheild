@@ -202,9 +202,16 @@ systemctl start clickhouse-server
 for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:8123/ping >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS http://127.0.0.1:8123/ping >/dev/null || die "ClickHouse did not start (journalctl -u clickhouse-server)"
 clickhouse-client --multiquery < "$PREFIX/clickhouse/001_schema.sql"
-if [ -n "$NEW_CH_PW" ]; then
-  clickhouse-client -q "CREATE USER IF NOT EXISTS shield IDENTIFIED WITH sha256_password BY '$NEW_CH_PW' HOST LOCAL"
-  clickhouse-client -q "GRANT SELECT, INSERT ON shield.* TO shield"
+# Shield's ClickHouse login, from the stored password, on every run: an earlier run that stopped
+# before this step (or a reinstalled ClickHouse) is repaired.
+CH_PW=$(sed -n 's/^SHIELD_CLICKHOUSE_PASSWORD=//p' "$ETC/collector.env")
+[[ $CH_PW =~ ^[0-9a-f]{16,}$ ]] || die "no usable ClickHouse password in $ETC/collector.env"
+clickhouse-client -q "CREATE USER IF NOT EXISTS shield IDENTIFIED WITH sha256_password BY '$CH_PW' HOST LOCAL"
+clickhouse-client -q "ALTER USER shield IDENTIFIED WITH sha256_password BY '$CH_PW' HOST LOCAL"
+clickhouse-client -q "GRANT SELECT, INSERT ON shield.* TO shield"
+if ! curl -fsS -H "X-ClickHouse-User: shield" -H "X-ClickHouse-Key: $CH_PW" \
+     "http://127.0.0.1:8123/?query=SELECT%20count()%20FROM%20shield.dst_1s" >/dev/null; then
+  die "ClickHouse rejects Shield's login (check: clickhouse-client -q 'SHOW USERS')"
 fi
 note "schema applied"
 
