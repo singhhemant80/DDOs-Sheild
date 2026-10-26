@@ -404,6 +404,7 @@ class BgpNeighborOut(_Out):
     ebgp_multihop: int | None = None
     has_md5_password: bool = False
     description: str | None = None
+    acceptance_passed_at: datetime | None = None
 
     _a = field_validator("neighbor_address", "local_address", mode="before")(_str)
 

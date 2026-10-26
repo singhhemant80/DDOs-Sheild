@@ -8,6 +8,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from .. import __version__, audit
+from .. import roadmap as rm
 from .. import telemetry as tm
 from ..changes import get_setting
 from ..db import get_db
@@ -108,6 +109,12 @@ def _collector_state() -> str:
 
 
 # ---------------------------------------------------------------- audit
+@router.get("/system/roadmap")
+def get_roadmap(_: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
+    """Phases done / next / pending, plus this installation's open go-live steps."""
+    return rm.roadmap(db)
+
+
 @router.get("/audit", response_model=list[AuditOut])
 def list_audit(
     entity_type: str | None = Query(None, max_length=64),
@@ -144,7 +151,7 @@ def list_settings(_: Principal = Depends(require(Perm.VIEW)), db: Session = Depe
 
 
 # Safety switches are changed only through the dedicated endpoints below.
-_GUARDED = {"automation_enabled", "rtbh_emergency_disable"}
+_GUARDED = {"automation_enabled", "rtbh_emergency_disable", "bgp_production_enabled"}
 
 
 def _validate_setting(key: str, value):
@@ -204,7 +211,7 @@ def update_setting(key: str, body: SettingUpdate, p: Principal = Depends(require
     if key not in DEFAULT_SETTINGS:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown setting")
     if key in _GUARDED:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Use /system/emergency-stop or /system/automation")
+        raise HTTPException(status.HTTP_409_CONFLICT, "Use /system/emergency-stop, /system/automation or /system/production")
     _validate_setting(key, body.value)
     if key == "bgp_speaker" and body.value != get_setting(db, "bgp_speaker", "simulated"):
         # Switching speakers with routes in flight would strand them on the old one.
@@ -226,6 +233,42 @@ def emergency_stop(p: Principal = Depends(require(Perm.AUTOMATION_STOP)), db: Se
     _set(db, p, "automation_enabled", False, "system.emergency_stop")
     _set(db, p, "rtbh_emergency_disable", True, "system.emergency_stop")
     return {"automation_enabled": False, "rtbh_emergency_disable": True}
+
+
+@router.post("/system/production")
+def set_production(enabled: bool, p: Principal = Depends(require(Perm.AUTOMATION_STOP)), db: Session = Depends(get_db)):
+    """Production BGP sessions on or off.
+
+    On: administrators only, signed in with two-factor, with the FRR speaker selected and no
+    emergency stop. Each production session still needs a passed acceptance run before it carries
+    real blackholes.
+    Off: any NOC operator. Every open mitigation is withdrawn (or cancelled) and Shield's
+    production sessions are removed from FRR. This is the full rollback."""
+    from ..mitigation import service
+    from ..models import MitigationAction
+    from ..rbac import has_perm
+    if enabled:
+        if not has_perm(p.user.role, Perm.MANAGE_SETTINGS):
+            raise HTTPException(403, "Only administrators can turn production announcements on")
+        if not p.mfa:
+            raise HTTPException(403, "Turning production announcements on requires a session signed in with "
+                                     "two-factor authentication (Settings, My account)")
+        if get_setting(db, "bgp_speaker", "simulated") != "frr":
+            raise HTTPException(409, "Select the FRR speaker first (bgp_speaker setting)")
+        if get_setting(db, "rtbh_emergency_disable", False):
+            raise HTTPException(409, "The emergency stop is on; clear it first")
+        _set(db, p, "bgp_production_enabled", True, "system.production_on")
+        return {"bgp_production_enabled": True, "withdrawn": 0}
+    n = 0
+    for a in db.execute(select(MitigationAction).where(MitigationAction.state.in_(
+            ["proposed", "approved", "executing", "active", "failed"])).with_for_update()).scalars():
+        try:
+            service.withdraw(db, a, actor=p.user.username, user_id=p.user.id, reason="production announcements switched off")
+            n += 1
+        except service.Conflict:
+            pass
+    _set(db, p, "bgp_production_enabled", False, "system.production_off")
+    return {"bgp_production_enabled": False, "withdrawn": n}
 
 
 @router.post("/system/automation")

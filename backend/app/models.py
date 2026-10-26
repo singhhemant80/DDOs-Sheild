@@ -402,6 +402,9 @@ class BgpNeighbor(TimestampMixin, Base):
     ebgp_multihop: Mapped[int | None] = mapped_column(SmallInteger)
     md5_password_enc: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(String(200))
+    # Phase 8: a production session carries real blackholes only after an acceptance run passed.
+    acceptance_passed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acceptance_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
     __table_args__ = (
         UniqueConstraint("router_id", "neighbor_address", name="uq_bgp_router_neighbor"),
@@ -765,6 +768,34 @@ class MitigationActionEvent(Base):
     __table_args__ = (Index("ix_action_events_action_at", "action_id", "at"),)
 
 
+class AcceptanceRun(Base):
+    """Phase 8: a canary announcement over one Shield BGP peer, proving that only the canary
+    changes, on Shield's sessions and on the routers, and that it is withdrawn cleanly."""
+
+    __tablename__ = "acceptance_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    peer: Mapped[str] = mapped_column(String(32), nullable=False)          # "upstream:<id>" or "internal"
+    target: Mapped[str] = mapped_column(CIDR, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    step: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    action_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("mitigation_actions.id", ondelete="SET NULL"))
+    started_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    step_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    baseline: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'running', 'passed', 'failed')", name="ck_acceptance_status"),
+        Index("ix_acceptance_peer_started", "peer", "started_at"),
+        # One run at a time per peer.
+        Index("uq_acceptance_running_peer", "peer", unique=True, postgresql_where=text("status IN ('pending','running')")),
+    )
+
+
 class RtbhRoute(TimestampMixin, Base):
     """Ledger of every RTBH announcement and its withdrawal."""
 
@@ -916,7 +947,8 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "four_eyes_approval": (False, "A mitigation must be approved by someone other than the person who proposed it."),
     "proposal_ttl_minutes": (15, "Proposals not approved within this time expire; the situation has probably changed."),
     "rtbh_flap_cooldown_seconds": (900, "After a blackhole is withdrawn, re-blackholing the same address within this time needs a human (no automatic re-announce)."),
-    "bgp_speaker": ("simulated", "Where blackhole routes are announced: 'simulated' (nothing leaves Shield) or 'frr' (Shield's FRR BGP speaker; staging peers only in this release)."),
+    "bgp_production_enabled": (False, "Production BGP sessions are configured and may carry blackholes (each only after its acceptance run passes). Changed only through its own switch."),
+    "bgp_speaker": ("simulated", "Where blackhole routes are announced: 'simulated' (nothing leaves Shield) or 'frr' (Shield's FRR BGP speaker: staging sessions, and production sessions once production is switched on)."),
     "bgp_router_id": ("", "BGP router ID of Shield's FRR speaker (an IPv4 address of this server)."),
     "rtbh_discard_nexthop_v4": ("192.0.2.1", "IPv4 next hop on blackhole routes when the provider policy sets none (a discard address)."),
     "rtbh_discard_nexthop_v6": ("100::1", "IPv6 next hop on blackhole routes when the provider policy sets none (RFC 6666 discard prefix)."),

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Check as CheckIcon, CircleAlert, FlaskConical, Pencil, Plus, ShieldBan, TriangleAlert, Undo2, X } from "lucide-react";
+import { ArrowLeft, Check as CheckIcon, CircleAlert, FlaskConical, Pencil, Plus, Radio, ShieldBan, TriangleAlert, Undo2, X } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useApi } from "../lib/hooks";
@@ -30,7 +30,8 @@ type LedgerRoute = { id: number; action_id: string; mode: string; prefix: string
   next_hop: string | null; status: string; speaker: string; announced_at: string | null; verified_at: string | null; withdrawn_at: string | null };
 type Upstream = { id: number; name: string; asn: number; enabled: boolean; rtbh_policy: { enabled: boolean; verified_at: string | null; communities: string[] } | null };
 type Status = { mode: string; running: boolean; counts: Record<string, number>; automation_enabled: boolean; emergency_stop: boolean;
-  four_eyes_approval: boolean; require_mfa_for_mitigation: boolean;
+  four_eyes_approval: boolean; require_mfa_for_mitigation: boolean; production_enabled?: boolean;
+  last_interlock?: { prefix: string; session?: string; peer?: string; at?: string }[];
   controller: { ts: number; leader: boolean; speaker_routes: number | null; last_reconcile: { at?: string; ok?: boolean; error?: string; reannounced?: string[]; withdrawn?: string[] } } | null };
 
 // ---------------------------------------------------------------- vocabulary
@@ -84,12 +85,22 @@ function useMitigationEvents(fn: () => void) {
 
 export function SimulationBanner() {
   const st = useApi<{ mode: string }>("/mitigation/status", 30_000);
+  if (st.data?.mode === "production") {
+    return (
+      <Notice tone="attack">
+        <span className="inline-flex items-start gap-2"><Radio size={16} className="mt-0.5 shrink-0" />
+          <span><strong>Production.</strong> Approved actions are announced to your production routers and providers, but only
+            over sessions that passed an acceptance run. Every route leaving Shield is checked against what was approved; anything
+            else is removed and new blackholes are stopped. <Link to="/settings" className="underline">Switch off</Link> withdraws everything.</span></span>
+      </Notice>
+    );
+  }
   if (st.data?.mode === "staging") {
     return (
       <Notice tone="signal">
         <span className="inline-flex items-start gap-2"><FlaskConical size={16} className="mt-0.5 shrink-0" />
           <span><strong>Staging.</strong> Approved actions are announced by Shield's FRR BGP speaker, only to sessions marked
-            staging (lab routers). Production sessions are not configured until phase 8.</span></span>
+            staging (lab routers). Production sessions stay unconfigured until an administrator switches production on under Settings.</span></span>
       </Notice>
     );
   }
@@ -99,6 +110,28 @@ export function SimulationBanner() {
         <span><strong>Simulation.</strong> Approved actions go through the whole workflow against a simulated BGP speaker.
           Nothing is announced to any router or provider. Switch the bgp_speaker setting to FRR to use staging sessions.</span></span>
     </Notice>
+  );
+}
+
+function WithdrawAllDialog({ count, onClose, onDone }: { count: number; onClose: () => void; onDone: () => void }) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const go = async () => {
+    setBusy(true); setErr(null);
+    try { await api("/mitigation/withdraw-all", { method: "POST", body: { reason: reason.trim() || "withdraw all (rollback)" } }); onDone(); onClose(); }
+    catch (e) { setErr(errText(e)); } finally { setBusy(false); }
+  };
+  return (
+    <Dialog open title="Withdraw every blackhole?" onClose={onClose}
+      footer={<><Button variant="quiet" onClick={onClose}>Cancel</Button>
+        <Button variant="danger" onClick={go} disabled={busy}><Undo2 size={15} /> Withdraw all ({count})</Button></>}>
+      <p>Every active blackhole is withdrawn and verified gone; everything awaiting approval or not yet announced is cancelled.</p>
+      <p className="text-ink-2">Addresses under attack become reachable again, so traffic returns to them. Policies may propose new
+        blackholes if attacks continue; use the emergency stop as well to prevent that.</p>
+      <Field label="Reason (recorded in the audit log)"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="rollback" /></Field>
+      <ErrorLine error={err} />
+    </Dialog>
   );
 }
 
@@ -233,6 +266,7 @@ export function MitigationCenter() {
   const closed = useApi<Action[]>("/mitigation/actions?state=closed&limit=40", 30_000);
   const st = useApi<Status>("/mitigation/status", 10_000);
   const [creating, setCreating] = useState(false);
+  const [withdrawAll, setWithdrawAll] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   useMitigationEvents(() => { live.reload(); closed.reload(); st.reload(); });
 
@@ -254,8 +288,14 @@ export function MitigationCenter() {
     <div className="space-y-5">
       <PageHeader title="Mitigation center"
         description="Blackhole requests: preview exactly what would be announced, approve, watch it verified, withdraw."
-        actions={can("mitigation_propose") && <Button variant="primary" onClick={() => setCreating(true)}><Plus size={16} /> Blackhole an address</Button>} />
+        actions={<>
+          {can("mitigation_withdraw") && (live.data?.length ?? 0) > 0 && <Button onClick={() => setWithdrawAll(true)}><Undo2 size={16} /> Withdraw all</Button>}
+          {can("mitigation_propose") && <Button variant="primary" onClick={() => setCreating(true)}><Plus size={16} /> Blackhole an address</Button>}</>} />
       <SimulationBanner />
+      {(s?.last_interlock?.length ?? 0) > 0 && (
+        <Notice tone="attack"><strong>Safety interlock tripped.</strong> Shield found routes leaving that no approved action covers and removed
+          them: {s!.last_interlock!.map((x) => `${x.prefix}${x.session ? ` (to ${x.session})` : ""}`).join(", ")}. New blackholes are stopped
+          (emergency stop) until someone checks Shield's FRR and turns automation back on under Settings.</Notice>)}
       <ErrorLine error={err ?? live.error} />
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
         <Lamp tone={s?.running ? (s.controller?.leader ? "ok" : "warn") : "attack"}
@@ -302,6 +342,7 @@ export function MitigationCenter() {
           ])} />
       </Section>
       {creating && <NewMitigationDialog onClose={() => setCreating(false)} onDone={(a) => { live.reload(); if (a[0]) nav(`/mitigation/${a[0].id}`); }} />}
+      {withdrawAll && <WithdrawAllDialog count={live.data?.length ?? 0} onClose={() => setWithdrawAll(false)} onDone={() => { live.reload(); closed.reload(); }} />}
     </div>
   );
 }

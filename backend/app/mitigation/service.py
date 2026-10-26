@@ -57,6 +57,7 @@ def propose(db: Session, req: PlanRequest, *, key: str, actor: str, user_id=None
             requested_by_id=user_id, timeout_seconds=60,
             plan={"route": r, "checks": plan["checks"], "duration_seconds": plan["duration_seconds"],
                   "request_fingerprint": fp, "simulation": plan.get("simulation", True),
+                  "acceptance_peer": req.acceptance_peer,
                   "speaker": plan.get("speaker", "simulated")},
             impact=plan["impact"], expected_state={"announced": [r["peer"] + "|" + r["prefix"]]})
         db.add(a)
@@ -74,7 +75,7 @@ def recheck(db: Session, actions: list[MitigationAction], *, automatic: bool = F
                       if a0.strategy == Strategy.RTBH_UPSTREAM else None,
                       incident_id=str(a0.incident_id) if a0.incident_id else None,
                       duration_seconds=(a0.plan or {}).get("duration_seconds"), automatic=automatic,
-                      auto_approve=auto_approve,
+                      auto_approve=auto_approve, acceptance_peer=(a0.plan or {}).get("acceptance_peer"),
                       exclude_action_ids=[str(a.id) for a in actions])
     return build_plan(db, req)
 

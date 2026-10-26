@@ -127,9 +127,10 @@ export function SettingsPage() {
             : <Button variant="primary" onClick={() => automation(true)}>Turn on and allow blackholes</Button>)}
         </div>
       </Section>
+      <ProductionSection get={get} reload={s.reload} />
       <DetectionProfiles />
       <Section title="System" aside={can("manage_settings") ? undefined : "Read-only for your role"} flush>
-        <Table rows={(s.data ?? []).filter((x) => !["automation_enabled", "rtbh_emergency_disable"].includes(x.key))} rowKey={(x) => x.key}
+        <Table rows={(s.data ?? []).filter((x) => !["automation_enabled", "rtbh_emergency_disable", "bgp_production_enabled"].includes(x.key))} rowKey={(x) => x.key}
           cols={[
             { key: "d", header: "Setting", render: (x) => <><div className="font-medium">{x.description}</div><code className="text-xs text-ink-3">{x.key}</code></> },
             { key: "v", header: "Value", className: "w-56", render: (x) => <SettingValue s={x} editable={can("manage_settings")} onSave={(v) => put(x.key, v)} /> },
@@ -137,6 +138,54 @@ export function SettingsPage() {
       </Section>
       <MyAccount />
     </div>
+  );
+}
+
+function ProductionSection({ get, reload }: { get: (k: string) => unknown; reload: () => Promise<unknown> }) {
+  const { me, can } = useAuth();
+  const [confirm, setConfirm] = useState<"on" | "off" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const on = get("bgp_production_enabled") === true;
+  const frr = get("bgp_speaker") === "frr";
+  const go = async (enabled: boolean) => {
+    setBusy(true); setErr(null);
+    try { await api(`/system/production?enabled=${enabled}`, { method: "POST" }); setConfirm(null); await reload(); }
+    catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+  const admin = can("manage_settings");
+  const why = !admin ? "Administrators only" : !me?.session_mfa_verified ? "Sign in with two-factor authentication first (My account below)"
+    : !frr ? "Set bgp_speaker to frr first" : get("rtbh_emergency_disable") === true ? "Clear the emergency stop first" : null;
+  return (
+    <Section title="Production BGP" aside={on ? <Badge tone="signal">On</Badge> : <Badge>Off</Badge>}>
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="max-w-[64ch] space-y-1 text-sm">
+          {on
+            ? <p>Shield announces approved blackholes to your <strong>production</strong> routers and providers, over sessions that passed an acceptance run.</p>
+            : <p>Production sessions are recorded but not configured: approved blackholes go only to staging (lab) sessions.</p>}
+          <p className="text-ink-3">Turning on needs an administrator signed in with two-factor. Then run an acceptance test per peer under
+            BGP sessions; until it passes, a production session only carries the test address. Anyone allowed to use the emergency stop can
+            turn production off, which withdraws every blackhole and removes the production sessions.</p>
+        </div>
+        {on ? (can("automation_stop") && <Button variant="danger" onClick={() => setConfirm("off")}>Switch off and withdraw all</Button>)
+          : <Button variant="primary" disabled={!!why} title={why ?? undefined} onClick={() => setConfirm("on")}>Switch production on</Button>}
+      </div>
+      {!on && why && admin && <p className="mt-2 text-xs text-warn">{why}</p>}
+      <ErrorLine error={err} />
+      <Dialog open={confirm !== null} title={confirm === "on" ? "Switch production BGP on?" : "Switch production BGP off?"} onClose={() => setConfirm(null)}
+        footer={<><Button variant="quiet" onClick={() => setConfirm(null)}>Cancel</Button>
+          <Button variant={confirm === "on" ? "primary" : "danger"} disabled={busy} onClick={() => go(confirm === "on")}>
+            {confirm === "on" ? "Switch on" : "Switch off and withdraw all"}</Button></>}>
+        {confirm === "on" ? <>
+          <p>Shield's FRR will open its production sessions. Nothing real is announced on a session until it passes an acceptance run.</p>
+          <p className="text-ink-2">Before you continue: the generated import filter is on each production router, the discard next hop is
+            routed to null there, and you have checked both on your RouterOS version.</p>
+        </> : <>
+          <p>Every active blackhole is withdrawn and verified gone, pending ones are cancelled, and the production sessions are removed.</p>
+          <p className="text-ink-2">Addresses under attack become reachable again.</p>
+        </>}
+      </Dialog>
+    </Section>
   );
 }
 
@@ -148,7 +197,7 @@ function SettingValue({ s, editable, onSave }: { s: Setting; editable: boolean; 
   if (!editable) return <span>{String(s.value) || <span className="text-ink-3">not set</span>}</span>;
   if (s.key === "bgp_speaker") {
     return <Select aria-label={s.key} value={String(s.value)} onChange={onSave}
-      options={[["simulated", "Simulated (nothing leaves Shield)"], ["frr", "FRR (staging sessions only)"]]} />;
+      options={[["simulated", "Simulated (nothing leaves Shield)"], ["frr", "FRR (Shield's BGP speaker)"]]} />;
   }
   if (typeof s.value === "string") {
     return (

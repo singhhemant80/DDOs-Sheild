@@ -1,4 +1,4 @@
-"""FRR speaker (Phase 7: staging peers only).
+"""FRR speaker (staging peers; production peers when switched on and accepted).
 
 Shield runs its own FRR (bgpd) on the Shield server and owns that BGP configuration. The controller
 talks to it through `vtysh`; every value placed in a command is re-serialised from a parsed IP
@@ -53,8 +53,8 @@ log = logging.getLogger("shield.frr")
 KEY_OWNERS = "shield:frr:owners"
 SAFE_LINE = re.compile(r"^[A-Za-z0-9 .:/_-]{1,200}$")
 SAFE_PASSWORD = re.compile(r"^[A-Za-z0-9._-]{8,80}$")
-# Phase 7: only sessions marked "staging" are configured. Production sessions arrive in phase 8.
-ALLOW_PRODUCTION = False
+# Production sessions are configured only while the bgp_production_enabled switch is on (Phase 8),
+# and carry real blackholes only after their acceptance run passed.
 
 
 @dataclass
@@ -69,6 +69,7 @@ class Neighbor:
     password: str | None = None
     environment: str = "staging"
     name: str = ""
+    accepted: bool = True       # staging sessions need no acceptance run
 
     @property
     def version(self) -> int:
@@ -86,6 +87,10 @@ class PeerSpec:
     next_hop_v4: str
     next_hop_v6: str
     neighbors: list[Neighbor] = field(default_factory=list)
+
+    @property
+    def unaccepted(self) -> list[str]:
+        return [nb.name for nb in self.neighbors if not nb.accepted]
 
 
 def _check_line(line: str) -> str:
@@ -148,8 +153,9 @@ class FrrSpeaker:
             BgpNeighbor.router_id.is_(None), BgpNeighbor.managed_by_shield, BgpNeighbor.enabled,
             BgpNeighbor.purpose.in_([BgpPurpose.RTBH_UPSTREAM, BgpPurpose.RTBH_SIGNAL]))
             .order_by(BgpNeighbor.id)).scalars().all()
+        production = bool(get_setting(db, "bgp_production_enabled", False))
         for n in rows:
-            if n.environment != "staging" and not ALLOW_PRODUCTION:
+            if n.environment != "staging" and not production:
                 continue
             if n.purpose == BgpPurpose.RTBH_UPSTREAM:
                 if n.upstream_id is None:
@@ -182,7 +188,8 @@ class FrrSpeaker:
                 address=str(ipaddress.ip_address(str(n.neighbor_address))), remote_asn=int(n.remote_asn),
                 local_asn=int(n.local_asn), port=int(n.remote_port or 179), multihop=n.ebgp_multihop,
                 update_source=str(ipaddress.ip_address(str(n.local_address))) if n.local_address else None,
-                max_prefix_out=n.max_prefix_out, password=pw, environment=n.environment, name=n.name))
+                max_prefix_out=n.max_prefix_out, password=pw, environment=n.environment, name=n.name,
+                accepted=n.environment == "staging" or n.acceptance_passed_at is not None))
             out[key] = spec
         return out
 
@@ -210,6 +217,16 @@ class FrrSpeaker:
                 lines.append(f"set ip next-hop {p.next_hop_v4}" if fam == 4 else f"set ipv6 next-hop global {p.next_hop_v6}")
                 lines.append("exit")
             lines += [f"route-map SHIELD-OUT-{p.tag} deny 100", "exit"]
+            # Production sessions not yet accepted get only the acceptance canary.
+            lines += [f"ip prefix-list SHIELD4-ACC-{p.tag} seq 1 deny 0.0.0.0/32",
+                      f"ipv6 prefix-list SHIELD6-ACC-{p.tag} seq 1 deny ::/128"]
+            for seq, fam in ((10, 4), (20, 6)):
+                lines.append(f"route-map SHIELD-ACC-{p.tag} permit {seq}")
+                lines.append(f"match {'ip' if fam == 4 else 'ipv6'} address prefix-list SHIELD{fam}-ACC-{p.tag}")
+                lines.append(f"set community {comms}" if comms else "no set community")
+                lines.append(f"set ip next-hop {p.next_hop_v4}" if fam == 4 else f"set ipv6 next-hop global {p.next_hop_v6}")
+                lines.append("exit")
+            lines += [f"route-map SHIELD-ACC-{p.tag} deny 100", "exit"]
         lines.append(f"router bgp {asn}")
         if rid:
             lines.append(f"bgp router-id {ipaddress.IPv4Address(rid)}")
@@ -233,9 +250,10 @@ class FrrSpeaker:
                 for nb in p.neighbors:
                     if nb.version != fam:
                         continue
+                    out_map = f"SHIELD-OUT-{p.tag}" if nb.accepted else f"SHIELD-ACC-{p.tag}"
                     lines += [f"neighbor {nb.address} activate",
                               f"neighbor {nb.address} route-map SHIELD-DENY in",
-                              f"neighbor {nb.address} route-map SHIELD-OUT-{p.tag} out"]
+                              f"neighbor {nb.address} route-map {out_map} out"]
                     if nb.max_prefix_out:
                         lines.append(f"neighbor {nb.address} maximum-prefix-out {int(nb.max_prefix_out)}")
             lines.append("exit-address-family")
@@ -292,6 +310,10 @@ class FrrSpeaker:
             raise SpeakerRefused("announcement does not belong to an executing or active action")
         if str(a.target) != str(net):
             raise SpeakerRefused("announcement prefix differs from its action's target")
+        canary = (a.plan or {}).get("acceptance_peer") == route.peer
+        if spec.unaccepted and not canary:
+            raise SpeakerRefused(f"production session(s) {', '.join(spec.unaccepted)} have not passed their "
+                                 "acceptance run; only its canary may be announced")
         pp = db.execute(select(ProtectedPrefix).where(cast(str(net), CIDR).op("<<=")(ProtectedPrefix.prefix))).scalar_one_or_none()
         if pp is None or not (pp.enabled and pp.ownership_verified and pp.rtbh_allowed):
             raise SpeakerRefused(f"{net} is not inside a protected prefix authorised for blackholing")
@@ -323,7 +345,12 @@ class FrrSpeaker:
                 raise SpeakerRefused(f"{spec.label} already carries {len(current)} routes (session limit {limit})")
         self.sync()
         fam = "ip" if net.version == 4 else "ipv6"
-        self._vtysh([f"{fam} prefix-list SHIELD{net.version}-{spec.tag} permit {net}",
+        canary = []
+        with self.sessions() as db:
+            a = db.get(MitigationAction, uuid.UUID(str(route.action_id)))
+            if a is not None and (a.plan or {}).get("acceptance_peer") == route.peer:
+                canary = [f"{fam} prefix-list SHIELD{net.version}-ACC-{spec.tag} permit {net}"]
+        self._vtysh(canary + [f"{fam} prefix-list SHIELD{net.version}-{spec.tag} permit {net}",
                      f"router bgp {asn}", f"address-family {'ipv4' if net.version == 4 else 'ipv6'} unicast",
                      f"network {net}", "exit-address-family", "exit"], configure=True)
         try:
@@ -345,6 +372,8 @@ class FrrSpeaker:
         listed = self._list(f"SHIELD{net.version}-{tag}", net.version)
         if str(net) in listed:
             lines.append(f"no {fam} prefix-list SHIELD{net.version}-{tag} permit {net}")
+        if str(net) in self._list(f"SHIELD{net.version}-ACC-{tag}", net.version):
+            lines.append(f"no {fam} prefix-list SHIELD{net.version}-ACC-{tag} permit {net}")
         still_used = any(str(net) in self._entries(p) for p in peers.values() if p.tag != tag)
         if not still_used and asn:
             lines += [f"router bgp {asn}", f"address-family {'ipv4' if net.version == 4 else 'ipv6'} unicast",
@@ -413,6 +442,28 @@ class FrrSpeaker:
             elif adv.get("nextHop") and adv.get("nextHop") != nh:
                 problems.append(f"advertised to {nb.address} with next hop {adv.get('nextHop')}, expected {nh}")
         return "; ".join(problems) or None
+
+    # ------------------------------------------------------------ what is really sent (Phase 8)
+    def advertised(self) -> dict[str, dict]:
+        """Per configured session: its peer key and the prefixes it is advertising right now."""
+        with self.sessions() as db:
+            peers = self.peers(db)
+        out = {}
+        for p in peers.values():
+            for nb in p.neighbors:
+                afi = "ipv4" if nb.version == 4 else "ipv6"
+                d = self._show_json(f"show bgp {afi} unicast neighbors {nb.address} advertised-routes json")
+                out[nb.address] = {"peer": p.key, "name": nb.name, "environment": nb.environment,
+                                   "accepted": nb.accepted,
+                                   "prefixes": sorted((d.get("advertisedRoutes") or {}).keys())}
+        return out
+
+    def remove_unauthorised(self, peer_key: str, prefix: str) -> None:
+        """Interlock: take a prefix off a peer whatever owns it, and re-apply Shield's policies
+        in case they were altered."""
+        self.withdraw(Route(peer=peer_key, prefix=prefix))
+        self._applied_hash = None
+        self.sync()
 
     def peer_state(self, address: str) -> str:
         for p in self.peer_status():

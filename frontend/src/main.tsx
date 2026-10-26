@@ -10,6 +10,7 @@ import { Analytics, LiveTraffic } from "./pages/Traffic";
 import { Bgp, Customers, Prefixes, Routers } from "./pages/Network";
 import { AuditLog, HealthPage, SettingsPage, Upcoming, Users } from "./pages/Admin";
 import { ActiveAttacks, AttackDetail, AttackHistory } from "./pages/Attacks";
+import { Roadmap } from "./pages/Roadmap";
 import { LiveProvider } from "./lib/live";
 import { RouterDetail, Topology } from "./pages/Routers";
 import { ActionDetail, BlackholeRoutes, MitigationCenter, Policies } from "./pages/Mitigation";
@@ -44,6 +45,7 @@ function App() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="audit" element={<AuditLog />} />
         <Route path="health" element={<HealthPage />} />
+        <Route path="roadmap" element={<Roadmap />} />
         <Route path="*" element={<Upcoming title="Page not found" phase={0}><p>There is no page at this address.</p></Upcoming>} />
       </Route>
     </Routes>

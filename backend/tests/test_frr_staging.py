@@ -331,7 +331,7 @@ def test_production_sessions_are_not_used(client, noc, engineer, lab):
     ctl().reconcile()
     assert f"neighbor {LAB}" not in vtysh(PS_SHIELD, "show running-config")
     p = client.post(f"{API}/preview", json={"target": VICTIM, "strategy": "rtbh_internal"}, headers=noc).json()
-    assert p["blocked"] and any("phase 8" in c["message"] for c in p["checks"] if c["level"] == "block")
+    assert p["blocked"] and any("switched off" in c["message"] for c in p["checks"] if c["level"] == "block")
 
 
 def test_speaker_switch_blocked_while_actions_open(client, noc, admin, lab):

@@ -333,7 +333,7 @@ class MikroTikPoller:
                 collector = get_setting(db, "collector_address", "") or None
                 st.addresses = snap.get("addresses", st.addresses or [])
                 if "routes" in snap:
-                    st.routes = {"items": snap["routes"]}
+                    st.routes = {"items": snap["routes"], "at": _now().isoformat()}
                 if "traffic_flow" in snap:
                     st.traffic_flow = snap["traffic_flow"]
                 st.permissions = {**(snap.get("permissions") or {}), "services": snap.get("services") or [],

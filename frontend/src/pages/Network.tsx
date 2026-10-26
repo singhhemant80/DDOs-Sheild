@@ -285,7 +285,15 @@ const PURPOSE: Record<string, string> = {
 
 type Session = Peer & { router_id: number | null; router: string | null; polled_at?: string; stale: boolean; in_inventory: boolean;
   neighbor_id: number | null; purpose: string | null; missing_on_router?: boolean; shield?: boolean; environment?: string;
-  prefixes_sent?: number | null; uptime?: string | null };
+  prefixes_sent?: number | null; uptime?: string | null; acceptance_passed_at?: string | null; peer?: string };
+
+type Run = { id: string; peer: string; target: string; status: "pending" | "running" | "passed" | "failed"; step: string;
+  action_id: string | null; started_at: string; finished_at: string | null; error: string | null;
+  steps: { at: string; step: string; ok: boolean; detail: string }[] };
+const STEP_WORD: Record<string, string> = {
+  pending: "Starting", baseline: "Baseline recorded", announcing: "Announcing the canary", verifying: "Canary advertised",
+  router_check: "Checking the router", withdrawing: "Withdrawing the canary", passed: "Passed", failed: "Failed",
+};
 
 export function Bgp() {
   const { can } = useAuth();
@@ -293,8 +301,10 @@ export function Bgp() {
   const live = useApi<Session[]>("/bgp/sessions", 10_000);
   const r = useApi<Router[]>("/routers");
   const events = useApi<RouterEvent[]>("/routers/events?limit=200", 30_000);
-  const st = useApi<{ speaker: string }>("/mitigation/status", 30_000);
+  const st = useApi<{ speaker: string; production_enabled?: boolean }>("/mitigation/status", 30_000);
+  const runs = useApi<Run[]>("/bgp/acceptance?limit=10", 5_000);
   const [edit, setEdit] = useState<Neighbor | "new" | null>(null);
+  const [accept, setAccept] = useState<string | null>(null);
   const [filter, setFilter] = useState(false);
   const rname = (id: number | null) => id == null ? "Shield" : r.data?.find((x) => x.id === id)?.name ?? "–";
   const routerSessions = (live.data ?? []).filter((x) => !x.shield);
@@ -302,6 +312,10 @@ export function Bgp() {
   const nb = (id: number | null) => n.data?.find((x) => x.id === id);
   const bgpEvents = (events.data ?? []).filter((e) => e.kind.startsWith("bgp_")).slice(0, 30);
   const frr = st.data?.speaker === "frr";
+  const prodOn = !!st.data?.production_enabled;
+  const peers = [...new Set(shieldSessions.map((x) => x.peer).filter(Boolean))] as string[];
+  const peerName = (peer: string) => peer === "internal" ? "your routers (internal)"
+    : shieldSessions.find((x) => x.peer === peer)?.name ?? peer;
   return (
     <div className="space-y-5">
       <PageHeader title="BGP sessions"
@@ -319,13 +333,30 @@ export function Bgp() {
               {x.environment === "production" ? <> <Badge tone="warn">Production</Badge></> : <> <Badge>Staging</Badge></>}</div>
               <div className="text-xs text-ink-3">{x.purpose ? PURPOSE[x.purpose] ?? x.purpose : ""}</div></> },
             { key: "e", header: "Peer", render: (x) => <>{x.remote_address}<div className="text-xs text-ink-3">AS{x.remote_as}</div></> },
-            { key: "s", header: "State", render: (x) => x.environment === "production"
-                ? <span className="text-ink-3">Not configured until phase 8</span>
-                : !frr ? <span className="text-ink-3">Speaker simulated</span>
+            { key: "s", header: "State", render: (x) => !frr ? <span className="text-ink-3">Speaker simulated</span>
+                : x.environment === "production" && !prodOn ? <span className="text-ink-3">Production switched off (Settings)</span>
                 : <Lamp tone={x.established ? "ok" : "attack"} label={x.established ? `Established ${x.uptime ?? ""}` : x.state} /> },
+            { key: "a", header: "Acceptance", render: (x) => x.environment !== "production" ? <span className="text-ink-3">Not needed (staging)</span>
+                : x.acceptance_passed_at ? <Badge tone="ok">Passed {dateTime(x.acceptance_passed_at)}</Badge>
+                : <Badge tone="warn">Not passed: test address only</Badge> },
             { key: "p", header: "Routes sent", align: "right", render: (x) => x.prefixes_sent ?? "–" },
           ]} />
       </Section>
+      {frr && (
+        <Section title="Acceptance runs" flush aside={can("config_network") && peers.length > 0 && <div className="flex gap-2">
+            {peers.map((pr) => <Button key={pr} onClick={() => setAccept(pr)}>Test {peerName(pr)}</Button>)}</div>}>
+          <p className="px-4 pt-3 text-sm text-ink-2">A run blackholes one unused address of yours over one peer, checks that it is advertised
+            only where intended, that nothing else Shield sends changes and, where Shield reads the router, that the router installed it while
+            its other routes stayed the same, then withdraws it. A production session carries real blackholes only after its run passes.</p>
+          <Table rows={runs.data ?? []} rowKey={(r) => r.id} empty="No runs yet."
+            cols={[
+              { key: "p", header: "Peer", render: (r) => <><div className="font-medium">{peerName(r.peer)}</div>
+                <div className="text-xs text-ink-3">{dateTime(r.started_at)}</div></> },
+              { key: "t", header: "Canary", render: (r) => <span className="font-mono text-[13.5px]">{r.target}</span> },
+              { key: "s", header: "Result", render: (r) => <RunState r={r} /> },
+            ]} />
+        </Section>
+      )}
       <Section title="On your routers" flush>
         <Table rows={routerSessions} rowKey={(x) => `${x.router_id}|${x.remote_address}`}
           empty="No sessions read yet. Add routers with API credentials under Routers & upstreams."
@@ -344,7 +375,45 @@ export function Bgp() {
       <Section title="Recent session changes" flush><EventTable rows={bgpEvents} showRouter /></Section>
       {edit && <SessionDialog session={edit === "new" ? null : edit} onClose={() => setEdit(null)} onDone={() => { n.reload(); live.reload(); }} />}
       {filter && <FilterDialog onClose={() => setFilter(false)} />}
+      {accept && <AcceptanceDialog peer={accept} name={peerName(accept)} onClose={() => setAccept(null)} onDone={() => runs.reload()} />}
     </div>
+  );
+}
+
+function RunState({ r }: { r: Run }) {
+  const tone = r.status === "passed" ? "ok" : r.status === "failed" ? "attack" : "signal";
+  return (
+    <div className="space-y-1">
+      <Lamp tone={tone} label={r.status === "passed" ? "Passed" : r.status === "failed" ? `Failed: ${r.error ?? ""}` : `${STEP_WORD[r.step] ?? r.step}…`} />
+      <ol className="space-y-0.5 text-xs text-ink-2">
+        {r.steps.map((s, i) => <li key={i} className={s.ok ? "" : "text-attack"}>{s.ok ? "✓" : "✗"} {STEP_WORD[s.step] ?? s.step}: {s.detail}</li>)}
+      </ol>
+    </div>
+  );
+}
+
+function AcceptanceDialog({ peer, name, onClose, onDone }: { peer: string; name: string; onClose: () => void; onDone: () => void }) {
+  const [target, setTarget] = useState("");
+  const [unused, setUnused] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    setBusy(true); setErr(null);
+    try { await api("/bgp/acceptance", { method: "POST", body: { peer, target: target.trim(), confirm_unused: unused } }); onDone(); onClose(); }
+    catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <Dialog open title={`Acceptance run: ${name}`} onClose={onClose}
+      footer={<><Button variant="quiet" onClick={onClose}>Cancel</Button>
+        <Button variant="primary" disabled={busy || !unused || !target.trim()} onClick={go}>Start run</Button></>}>
+      <p>Choose one address inside a protected prefix that nothing uses: no customer, no server, no router. It is blackholed for the
+        length of the run (normally under a minute) and then withdrawn.</p>
+      <Field label="Canary address" hint="A single IPv4 or IPv6 address"><Input value={target} onChange={(e) => setTarget(e.target.value)} placeholder="e.g. 203.0.113.250" /></Field>
+      <Check label="This address is not in use and may be unreachable during the test" checked={unused} onChange={setUnused} />
+      <p className="text-sm text-ink-3">The run fails, withdraws the canary and changes nothing if the session is down, the canary shows up
+        anywhere it should not, any other route changes, or a step takes too long.</p>
+      <ErrorLine error={err} />
+    </Dialog>
   );
 }
 
@@ -406,7 +475,7 @@ function SessionDialog({ session, onClose, onDone }: { session: Neighbor | null;
         <Field label="TCP MD5 password" hint={session?.has_md5_password ? "Stored encrypted; leave empty to keep" : "Optional; letters, digits . _ -"}>
           <Input type="password" autoComplete="new-password" value={f.md5_password} onChange={(e) => set("md5_password", e.target.value)} /></Field>
         <Field label="Environment"><Select value={f.environment} onChange={(v) => set("environment", v)}
-          options={[["staging", "Staging (lab)"], ["production", "Production (used from phase 8)"]]} /></Field>
+          options={[["staging", "Staging (lab)"], ["production", "Production (needs an acceptance run)"]]} /></Field>
         <div className="pt-6"><Check label="Enabled" checked={f.enabled} onChange={(v) => set("enabled", v)} /></div>
       </div>
       <ErrorLine error={err} />

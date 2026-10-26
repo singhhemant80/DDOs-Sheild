@@ -9,12 +9,28 @@
 | 5 | MikroTik read-only integration | Discovery, BGP state, routes, counters from CCR2004 lab unit | **Done against the RouterOS protocol simulator**; CCR2004/CCR2116 hardware check pending (docs/mikrotik.md) |
 | 6 | RTBH controller in simulation mode | Full workflow with dry-run plans, approvals, idempotency, restart reconciliation | **Done** (docs/mitigation.md) |
 | 7 | Staging BGP with FRR, route filters, approval gates | Lab router accepts only authorised /32s; unauthorised and malformed requests rejected | **Done** with FRR lab routers (docs/bgp.md); MikroTik filter check pending |
-| 8 | Controlled live mitigation, rollback, verification | Acceptance tests prove unrelated prefixes unaffected | Next |
-| 9 | Selective ISP steering, local filtering, scrubbing adapter | | |
-| 10 | Alerting, reporting, hardening, production checklist | | |
+| 8 | Controlled live mitigation, rollback, verification | Acceptance tests prove unrelated prefixes unaffected | **Done** with FRR lab routers (docs/production.md); first production run is on your network |
+| 9 | Selective ISP steering, local filtering, scrubbing adapter | Waiting for the rest of the specification | **Next** |
+| 10 | Alerting, reporting, hardening, production checklist | | Pending |
 
 > Note: the master specification document was truncated partway through Phase 9; Phase 9's
 > remaining text and any Phase 10 definition should be supplied before that work starts.
+
+The dashboard shows the same table live on the **Roadmap** page (and a progress card in the
+sidebar), together with the go-live steps still open on your installation.
+
+## Phase 8 notes
+
+- Production sessions are configured only while `bgp_production_enabled` is on (switched by an
+  administrator with an MFA session; anyone with the emergency stop can switch it off, which
+  withdraws everything).
+- A production session carries only its acceptance canary until a run passes for that peer. Any
+  change to the session or the provider's policy resets acceptance.
+- After every announcement and every 30 seconds, the interlock compares what each session
+  advertises with what approved actions allow; anything else is removed and the emergency stop is
+  engaged.
+- The router check in an acceptance run uses the routes Shield reads from your MikroTik (poll
+  interval 60 s). Without a readable router the step is skipped and the run says so.
 
 ## Phase 7 notes
 

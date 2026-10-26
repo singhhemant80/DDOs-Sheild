@@ -1,7 +1,7 @@
 """shield-mitigator: carries out approved mitigation actions and keeps the speaker in step.
 
 The speaker follows the bgp_speaker setting: SimulatedSpeaker (nothing leaves Shield) or, from
-Phase 7, Shield's FRR, which in this release is configured with staging peers only. The workflow,
+Shield's FRR (staging peers, plus production peers once switched on and accepted). The workflow,
 checks, timings and failure handling are the same for both.
 
 Loop (every second):
@@ -44,6 +44,7 @@ from ..models import (
     RtbhStatus,
 )
 from . import service
+from .acceptance import AcceptanceRunner, run_interlock
 from .planner import RTBH_STRATEGIES, PlanRequest, build_plan
 from .speaker import Route, SimulatedSpeaker, Speaker, SpeakerError, SpeakerRefused, make_speaker
 from .state import record, transition
@@ -82,6 +83,8 @@ class Controller:
         self.last_reconcile: dict = {}
         self.leader = False
         self._lock_conn = None
+        self.acceptance = AcceptanceRunner(self)
+        self.last_interlock: list[dict] = []
 
     # ------------------------------------------------------------ leadership
     def acquire_lock(self) -> bool:
@@ -122,7 +125,7 @@ class Controller:
         except Exception:
             log.exception("could not select the BGP speaker")
         steps = [self.expire_proposals, self.execute_pending, self.process_withdrawals, self.rollback_failed,
-                 self.process_expiry]
+                 self.process_expiry, self.acceptance.tick]
         if force_reconcile or mono - self.last_auto_at >= AUTO_EVERY:
             steps.insert(1, self.auto_propose)
             self.last_auto_at = mono
@@ -313,18 +316,27 @@ class Controller:
                 audit.record(db, audit.SYSTEM_ACTOR, "mitigation.announce", "mitigation_action", a.id,
                              after={"route": (a.plan or {}).get("route", {}).get("description"), "speaker": self.speaker.name})
                 self.next_try.pop(aid, None)
-                return 1
-            a.attempts += 1
-            a.error = err
-            route.last_verify_result = {"ok": False, "at": now.isoformat(), "error": err}
-            record(db, a, None, ACTOR, "announce_failed", error=err, attempt=a.attempts)
-            if a.state == S.EXECUTING and (refused or (now - started).total_seconds() >= timeout):
-                route.status = RtbhStatus.FAILED
-                a.completed_at = now
-                transition(db, a, S.FAILED, ACTOR, "failed",
-                           error=err if refused else f"gave up after {timeout} s: {err}")
-            self._later(aid)
-            return 0
+                announced = True
+            else:
+                announced = False
+                a.attempts += 1
+                a.error = err
+                route.last_verify_result = {"ok": False, "at": now.isoformat(), "error": err}
+                record(db, a, None, ACTOR, "announce_failed", error=err, attempt=a.attempts)
+                if a.state == S.EXECUTING and (refused or (now - started).total_seconds() >= timeout):
+                    route.status = RtbhStatus.FAILED
+                    a.completed_at = now
+                    transition(db, a, S.FAILED, ACTOR, "failed",
+                               error=err if refused else f"gave up after {timeout} s: {err}")
+                self._later(aid)
+        if announced:
+            # After every real announcement: nothing but authorised routes may be leaving.
+            try:
+                self.last_interlock = run_interlock(self) or self.last_interlock
+            except SpeakerError as e:
+                log.warning("interlock check failed: %s", e)
+            return 1
+        return 0
 
     def _route_row(self, db: Session, a: MitigationAction) -> int:
         row = db.execute(select(RtbhRoute).where(RtbhRoute.action_id == a.id)
@@ -423,6 +435,9 @@ class Controller:
             if hasattr(self.speaker, "sync"):
                 self.speaker.sync()          # sessions and policies first (e.g. after FRR restarted)
             rib = self.speaker.routes()
+            found = run_interlock(self)
+            if found:
+                self.last_interlock = found
         except SpeakerError as e:
             self.last_reconcile = {"at": self.clock().isoformat(), "ok": False, "error": str(e)}
             return self.last_reconcile
@@ -488,7 +503,8 @@ class Controller:
             self.rds.set(KEY_STATUS, json.dumps({
                 "ts": int(time.time()), "mode": "simulation" if self.speaker.name == "simulated" else "staging",
                 "speaker": self.speaker.name, "leader": self.leader, "peers": peers,
-                "speaker_routes": rib, "last_reconcile": self.last_reconcile}), ex=30)
+                "speaker_routes": rib, "last_reconcile": self.last_reconcile,
+                "last_interlock": self.last_interlock}), ex=30)
         except redis.RedisError:
             pass
 
@@ -497,7 +513,7 @@ class Controller:
         signal.signal(signal.SIGTERM, lambda *_: stop.set())
         signal.signal(signal.SIGINT, lambda *_: stop.set())
         log.info("mitigation controller started; BGP speaker follows the bgp_speaker setting "
-                 "(simulated, or FRR to staging peers only in this release)")
+                 "(simulated, or FRR: staging peers, plus production peers when switched on)")
         while not stop.is_set():
             if not self.leader:
                 try:

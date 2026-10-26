@@ -1,9 +1,9 @@
-# Shield's BGP speaker (Phase 7: staging)
+# Shield's BGP speaker
 
-From Phase 7 Shield announces blackhole routes with its own FRR (`bgpd`), installed on the Shield
-server by the installer. In this release FRR is configured **only with sessions marked staging**
-(lab routers). Sessions marked production are recorded but never configured; that starts in
-phase 8.
+Shield announces blackhole routes with its own FRR (`bgpd`), installed on the Shield server by the
+installer. Sessions marked **staging** (lab routers) are configured as soon as the speaker is FRR.
+Sessions marked **production** are configured only once production is switched on, and carry real
+blackholes only after an acceptance run: see [production.md](production.md).
 
 Nothing changes until you choose it: the `bgp_speaker` setting stays `simulated` (nothing leaves
 Shield) until an administrator switches it to `frr`. Switching is refused while any mitigation
@@ -33,7 +33,7 @@ the action fails and is rolled back after 60 seconds.
 2. **Database**: an action's target must be inside an enabled protected prefix (trigger).
 3. **Speaker**, independently of the planner: the action must exist and be executing or active;
    the prefix must equal its target, be inside a protected prefix that allows blackholing and be
-   no broader than allowed; the session must be a Shield-managed staging session; communities and
+   no broader than allowed; the session must be a Shield-managed session that is allowed to carry it (staging, or accepted production); communities and
    next hop must match the peer's current policy. Every FRR command is built from parsed values
    and checked against a strict character set (vtysh would otherwise run a newline as a second
    command).
@@ -54,7 +54,7 @@ the action fails and is rolled back after 60 seconds.
 5. Blackhole a test address from the Mitigation center and check it on the router.
 
 For a provider's blackhole service, add a session with purpose *Provider blackhole service*; it uses
-that upstream's verified blackhole policy (communities, next hop). Keep it staging until phase 8.
+that upstream's verified blackhole policy (communities, next hop). Keep it staging until it has been tested, then follow [production.md](production.md).
 
 ## Tested
 
@@ -71,7 +71,7 @@ that upstream's verified blackhole policy (communities, next hop). Keep it stagi
   no longer allows blackholing; FRR's configuration is unchanged after each refusal;
 - a session that is down: the action fails and is rolled back;
 - FRR restarted with an empty configuration: reconciliation restores sessions and routes;
-- production sessions are not configured and the plan says so; the speaker cannot be switched
+- production sessions are not configured while production is off, and the plan says so; the speaker cannot be switched
   while actions are open; provider sessions carry the provider's communities.
 
 Lab run with the real collector, detector, controller and FRR (loopback only):

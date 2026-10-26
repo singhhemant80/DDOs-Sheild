@@ -1,4 +1,4 @@
-# API Guide (v1, Phase 4)
+# API Guide (v1, Phase 8)
 
 Interactive OpenAPI: `/api/v1/docs` (non-production, or `SHIELD_EXPOSE_DOCS=true`).
 Raw spec: `/api/v1/openapi.json`.
@@ -34,15 +34,17 @@ disabling a user revokes sessions immediately.
 | Router checks | `POST /routers/{id}/test` (one read-only connection with the stored credentials; returns checks, account permissions, or the presented certificate fingerprint), `POST /routers/{id}/certificate` (reads the certificate without sending credentials) | Network Engineer |
 | Upstreams | CRUD + `PUT /upstreams/{id}/rtbh-policy`, `POST …/verify`, `…/enable`, `…/disable` | Engineer (disable: NOC) |
 | BGP | `GET/POST /bgp/neighbors`, `PATCH/DELETE /bgp/neighbors/{id}` (`environment`, `remote_port`, `ebgp_multihop`, `md5_password` write-only), `GET /bgp/sessions` (live from routers and Shield's FRR), `GET /bgp/receive-filter?format=routeros\|frr` (router import filter for Shield's blackholes, text) | Network Engineer |
+| Acceptance runs | `POST /bgp/acceptance` (`{"peer": "internal" \| "upstream:<id>", "target": "<unused address>", "confirm_unused": true}`), `GET /bgp/acceptance?peer=&limit=`, `GET /bgp/acceptance/{id}` | Network Engineer |
 | Customers | `GET/POST /customers/ips`, `DELETE /customers/ips/{id}` | Network Engineer |
 | Audit | `GET /audit`, `GET /audit/verify` | — (read) |
 | Settings | `GET /settings`, `PUT /settings/{key}` | Admin |
-| Safety | `POST /system/emergency-stop` (NOC+), `POST /system/automation?enabled=` (Engineer+) | |
+| Safety | `POST /system/emergency-stop` (NOC+), `POST /system/automation?enabled=` (Engineer+), `POST /system/production?enabled=` (on: Admin with an MFA session; off: NOC+, withdraws everything), `POST /mitigation/withdraw-all` (`{"reason": "..."}`, NOC+) | |
+| Roadmap | `GET /system/roadmap` (phases done / next / pending and this installation's open go-live steps) | read-only |
 | Traffic | `GET /traffic/live`, `/traffic/history`, `/traffic/totals`, `/traffic/top`, `/traffic/destinations/{ip}`, `/traffic/interfaces`, `/collector/status` | read-only |
 | Live stream | WebSocket `/ws/traffic` (traffic every second + incident events) | read-only |
 | Attacks | `GET /attacks?state=open\|closed\|all&severity=&q=&confirmed_only=`, `/attacks/summary`, `/attacks/{id}`, `/attacks/{id}/series` | read-only |
 | Attack actions | `POST /attacks/{id}/acknowledge`, `/attacks/{id}/false-positive` (`{"note": "..."}`), `/attacks/{id}/notes` | NOC operator |
-| Mitigation (simulation) | `POST /mitigation/preview`, `POST /mitigation/actions` (header `Idempotency-Key` required), `GET /mitigation/actions?state=live\|proposed\|active\|closed\|all&incident_id=`, `GET /mitigation/actions/{id}`, `POST …/{id}/approve`, `…/reject` and `…/withdraw?whole_group=` (`{"reason": "..."}`), `…/extend` (`{"minutes": 60}`), `GET /mitigation/routes`, `GET /mitigation/status` | NOC operator |
+| Mitigation | `POST /mitigation/preview`, `POST /mitigation/actions` (header `Idempotency-Key` required), `GET /mitigation/actions?state=live\|proposed\|active\|closed\|all&incident_id=`, `GET /mitigation/actions/{id}`, `POST …/{id}/approve`, `…/reject` and `…/withdraw?whole_group=` (`{"reason": "..."}`), `…/extend` (`{"minutes": 60}`), `GET /mitigation/routes`, `GET /mitigation/status` | NOC operator |
 | Mitigation policies | `GET/POST /mitigation/policies`, `PUT/DELETE /mitigation/policies/{id}` | Network engineer |
 | Detection | `GET/POST /detection/profiles`, `PUT/DELETE /detection/profiles/{id}`, `GET /detection/status` | Network engineer (profiles) |
 

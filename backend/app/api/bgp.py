@@ -5,7 +5,10 @@ from __future__ import annotations
 import ipaddress
 import json
 
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,7 +18,9 @@ from .. import telemetry as tm
 from ..changes import get_setting, record_change
 from ..db import get_db
 from ..deps import Principal, require
-from ..models import BgpNeighbor, BgpPurpose, ProtectedPrefix, Router, RouterState, UpstreamProvider
+from ..models import (
+    AcceptanceRun, BgpNeighbor, BgpPurpose, CustomerIpAssignment, ProtectedPrefix, Router, RouterState, UpstreamProvider,
+)
 from ..rbac import Perm
 from ..schemas import BgpNeighborCreate, BgpNeighborOut, BgpNeighborUpdate
 
@@ -75,6 +80,8 @@ def live_sessions(_: Principal = Depends(require(Perm.VIEW)), db: Session = Depe
                         "router": "Shield", "shield": True, "state": (sp or {}).get("state") or "not running",
                         "established": (sp or {}).get("state") == "Established", "prefixes_sent": (sp or {}).get("prefixes_sent"),
                         "uptime": (sp or {}).get("uptime"), "environment": n.environment,
+                        "acceptance_passed_at": n.acceptance_passed_at,
+                        "peer": "internal" if n.purpose == BgpPurpose.RTBH_SIGNAL else f"upstream:{n.upstream_id}",
                         "in_inventory": True, "neighbor_id": n.id, "purpose": n.purpose.value,
                         "managed_by_shield": n.managed_by_shield, "stale": sp is None})
     return out
@@ -114,10 +121,14 @@ def update_neighbor(neighbor_id: int, body: BgpNeighborUpdate, p: Principal = De
         # Recorded now; the speaker does not configure production sessions until phase 8.
         if not p.mfa and get_setting(db, "require_mfa_for_mitigation", False):
             raise HTTPException(403, "Marking a session production requires an MFA session")
+    changed = {k for k, v in data.items() if getattr(n, k) != v} | ({"md5_password"} if pw is not None else set())
     for k, v in data.items():
         setattr(n, k, v)
     if pw is not None:
         n.md5_password_enc = _encrypt(pw) if pw else None
+    # Anything that changes where or how routes are sent invalidates the acceptance run.
+    if changed & {"environment", "remote_port", "ebgp_multihop", "local_address", "md5_password", "max_prefix_out"}:
+        n.acceptance_passed_at = None
     record_change(db, p.actor, "bgp_neighbor.update", "bgp_neighbor", n, before=before)
     return _out(n)
 
@@ -190,3 +201,73 @@ def receive_filter(db: Session, fmt: str, shield_address: str | None = None) -> 
 def get_receive_filter(fmt: str = Query("routeros", alias="format", pattern="^(routeros|frr)$"),
                        _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
     return receive_filter(db, fmt)
+
+
+# ---------------------------------------------------------------- acceptance runs (Phase 8)
+class AcceptanceIn(BaseModel):
+    peer: str = Field(pattern=r"^(internal|upstream:[0-9]{1,9})$")
+    target: str = Field(max_length=64)
+    confirm_unused: bool = False
+
+
+def _run_out(r: AcceptanceRun) -> dict:
+    return {"id": str(r.id), "peer": r.peer, "target": str(r.target), "status": r.status, "step": r.step,
+            "action_id": str(r.action_id) if r.action_id else None, "started_at": r.started_at,
+            "finished_at": r.finished_at, "steps": r.steps or [], "error": r.error}
+
+
+@router.post("/acceptance", status_code=201)
+def start_acceptance(body: AcceptanceIn, p: Principal = Depends(require(Perm.CONFIG_NETWORK)),
+                     db: Session = Depends(get_db)):
+    """Start an acceptance run: a canary blackhole for an unused address of yours over one peer,
+    proving that nothing else changes. Production sessions carry real blackholes only after one passes."""
+    from .. import netvalidate as nv
+    if get_setting(db, "bgp_speaker", "simulated") != "frr":
+        raise HTTPException(409, "Acceptance runs need the FRR speaker (bgp_speaker setting)")
+    if not body.confirm_unused:
+        raise HTTPException(422, "Confirm that the canary address is not in use: it will be unreachable during the run")
+    try:
+        net = nv.parse_target(body.target)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+    if net.num_addresses != 1:
+        raise HTTPException(422, "The canary must be a single address")
+    from sqlalchemy import cast
+    from sqlalchemy.dialects.postgresql import CIDR
+    if db.execute(select(CustomerIpAssignment).where(cast(str(net), CIDR).op("<<=")(CustomerIpAssignment.address))).first():
+        raise HTTPException(422, "That address is assigned to a customer; choose an unused one")
+    q = select(BgpNeighbor).where(BgpNeighbor.router_id.is_(None), BgpNeighbor.managed_by_shield, BgpNeighbor.enabled)
+    q = q.where(BgpNeighbor.purpose == BgpPurpose.RTBH_SIGNAL) if body.peer == "internal" else \
+        q.where(BgpNeighbor.purpose == BgpPurpose.RTBH_UPSTREAM, BgpNeighbor.upstream_id == int(body.peer.split(":")[1]))
+    sessions = db.execute(q).scalars().all()
+    if not sessions:
+        raise HTTPException(422, "Shield has no enabled session for that peer")
+    if any(n.environment == "production" for n in sessions) and not get_setting(db, "bgp_production_enabled", False):
+        raise HTTPException(409, "Turn production announcements on first (Settings)")
+    if db.execute(select(AcceptanceRun).where(AcceptanceRun.peer == body.peer,
+                                              AcceptanceRun.status.in_(["pending", "running"]))).first():
+        raise HTTPException(409, "An acceptance run for this peer is already in progress")
+    run = AcceptanceRun(id=uuid.uuid4(), peer=body.peer, target=str(net), status="pending", step="pending",
+                        started_by_id=p.user.id, baseline={}, steps=[])
+    db.add(run)
+    db.flush()
+    audit.record(db, p.actor, "acceptance.start", "acceptance_run", run.id,
+                 after={"peer": body.peer, "target": str(net)})
+    return _run_out(run)
+
+
+@router.get("/acceptance")
+def list_acceptance(peer: str | None = None, limit: int = Query(20, ge=1, le=200),
+                    _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
+    q = select(AcceptanceRun).order_by(AcceptanceRun.started_at.desc()).limit(limit)
+    if peer:
+        q = q.where(AcceptanceRun.peer == peer)
+    return [_run_out(r) for r in db.execute(q).scalars()]
+
+
+@router.get("/acceptance/{run_id}")
+def get_acceptance(run_id: uuid.UUID, _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
+    r = db.get(AcceptanceRun, run_id)
+    if r is None:
+        raise HTTPException(404, "Acceptance run not found")
+    return _run_out(r)

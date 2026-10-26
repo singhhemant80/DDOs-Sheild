@@ -91,6 +91,10 @@ def put_rtbh_policy(upstream_id: int, body: RtbhPolicyIn, p: Principal = Depends
     pol.enabled = False
     pol.verified_at = None
     pol.verified_by_id = None
+    # New communities or next hop: the provider sessions must pass acceptance again.
+    from ..models import BgpNeighbor
+    for n in db.execute(select(BgpNeighbor).where(BgpNeighbor.upstream_id == u.id)).scalars():
+        n.acceptance_passed_at = None
     record_change(db, p.actor, "rtbh_policy.put", "upstream_rtbh_policy", pol, before=before)
     return pol
 

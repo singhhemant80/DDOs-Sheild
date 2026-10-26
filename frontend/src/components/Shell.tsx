@@ -2,7 +2,7 @@ import { Component, useState, type ReactNode } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   Activity, BarChart3, Bell, Cable, ClipboardList, Gauge, HeartPulse, History, LogOut, Menu, Moon, Network,
-  OctagonX, Router as RouterIcon, Settings, ShieldAlert, ShieldBan, Sun, Swords, Users, Waypoints, Globe2,
+  Map as MapIcon, OctagonX, Router as RouterIcon, Settings, ShieldAlert, ShieldBan, Sun, Swords, Users, Waypoints, Globe2,
 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { api } from "../lib/api";
@@ -10,6 +10,7 @@ import { useApi } from "../lib/hooks";
 import { useLive } from "../lib/live";
 import { ago } from "../lib/format";
 import { Button, Dialog, Lamp, Notice } from "./ui";
+import { RoadmapMini } from "../pages/Roadmap";
 
 type Item = { to: string; label: string; icon: ReactNode; phase?: number };
 
@@ -39,6 +40,7 @@ export const NAV: { group: string; items: Item[] }[] = [
     { to: "/settings", label: "Settings", icon: <Settings size={17} /> },
     { to: "/audit", label: "Audit log", icon: <ClipboardList size={17} /> },
     { to: "/health", label: "System health", icon: <HeartPulse size={17} /> },
+    { to: "/roadmap", label: "Roadmap", icon: <MapIcon size={17} /> },
   ] },
 ];
 
@@ -103,6 +105,7 @@ function StatusStrip() {
       <Lamp tone={data?.automation_enabled ? "signal" : "neutral"}
         label={data?.automation_enabled ? "Automatic mitigation on" : "Automatic mitigation off"} />
       {data?.rtbh_emergency_disable && <Lamp tone="warn" label="New blackholes blocked" />}
+      <MitigationLamps />
       <div className="ml-auto flex items-center gap-2">
         {can("automation_stop") && (
           <Button variant="danger" onClick={() => setConfirm(true)} disabled={!!stopped}
@@ -126,6 +129,23 @@ function StatusStrip() {
         {err && <Notice tone="attack">{err}</Notice>}
       </Dialog>
     </div>
+  );
+}
+
+type MStatus = { mode: string; last_interlock: { prefix: string; session?: string; at?: string }[] };
+
+/** BGP mode (only shown once real routes can leave), and any safety-interlock trip. */
+function MitigationLamps() {
+  const { data } = useApi<MStatus>("/mitigation/status", 15_000);
+  if (!data) return null;
+  const trip = data.last_interlock?.[0];
+  return (
+    <>
+      {data.mode === "production" && <NavLink to="/bgp" className="hover:underline"><Lamp tone="signal" label="Production BGP on" /></NavLink>}
+      {data.mode === "staging" && <NavLink to="/bgp" className="hover:underline"><Lamp tone="neutral" label="BGP: staging only" /></NavLink>}
+      {trip && <NavLink to="/mitigation" className="hover:underline"><Lamp tone="attack"
+        label={<strong className="text-attack">Safety interlock removed {data.last_interlock.length > 1 ? `${data.last_interlock.length} routes` : trip.prefix}</strong>} /></NavLink>}
+    </>
   );
 }
 
@@ -208,6 +228,7 @@ export function Shell() {
             </ul>
           </div>
         ))}
+        <div className="pb-4"><RoadmapMini /></div>
       </nav>
       {open && <div className="fixed inset-0 z-20 bg-black/30 md:hidden" onClick={() => setOpen(false)} />}
       <div className="min-w-0 flex-1">

@@ -200,6 +200,22 @@ def withdraw(action_id: uuid.UUID, body: ReasonIn, whole_group: bool = False,
     return [_out(x, ups, users) for x in targets]
 
 
+@router.post("/withdraw-all")
+def withdraw_all(body: ReasonIn, p: Principal = Depends(require(Perm.MITIGATION_WITHDRAW)), db: Session = Depends(get_db)):
+    """Rollback: withdraw every active blackhole and cancel everything not yet announced."""
+    done = []
+    for a in db.execute(select(MitigationAction).where(MitigationAction.state.in_(
+            ["proposed", "approved", "executing", "active", "failed"])).with_for_update()).scalars():
+        try:
+            service.withdraw(db, a, actor=p.user.username, user_id=p.user.id, reason=body.reason)
+            done.append(str(a.id))
+        except service.Conflict:
+            pass
+    audit.record(db, p.actor, "mitigation.withdraw_all", "mitigation_action", None,
+                 after={"actions": done, "reason": body.reason})
+    return {"withdrawn": len(done)}
+
+
 @router.post("/actions/{action_id}/extend")
 def extend(action_id: uuid.UUID, body: ExtendIn, p: Principal = Depends(require(Perm.MITIGATION_APPROVE)),
            db: Session = Depends(get_db)):
@@ -255,13 +271,17 @@ def controller_status(_: Principal = Depends(require(Perm.VIEW)), db: Session = 
     counts = dict(db.execute(select(MitigationAction.state, func.count()).group_by(MitigationAction.state)).all())
     speaker = get_setting(db, "bgp_speaker", "simulated")
     return {
-        "mode": "simulation" if speaker == "simulated" else "staging", "speaker": speaker,
+        "mode": "simulation" if speaker == "simulated" else
+                ("production" if get_setting(db, "bgp_production_enabled", False) else "staging"),
+        "speaker": speaker,
         "controller": st, "running": st is not None,
         "counts": {k.value: v for k, v in counts.items()},
         "automation_enabled": get_setting(db, "automation_enabled", False),
         "emergency_stop": get_setting(db, "rtbh_emergency_disable", False),
         "four_eyes_approval": get_setting(db, "four_eyes_approval", False),
         "require_mfa_for_mitigation": get_setting(db, "require_mfa_for_mitigation", False),
+        "production_enabled": get_setting(db, "bgp_production_enabled", False),
+        "last_interlock": (st or {}).get("last_interlock") or [],
     }
 
 

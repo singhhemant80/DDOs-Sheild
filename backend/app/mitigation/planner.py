@@ -41,6 +41,7 @@ class PlanRequest:
     automatic: bool = False          # proposed by a policy: stricter checks
     auto_approve: bool = False       # will run without a person approving: needs the automation switch
     exclude_action_ids: list[str] = field(default_factory=list)   # re-checking an existing action
+    acceptance_peer: str | None = None   # Phase 8: canary of an acceptance run over this peer
 
 
 class Plan(dict):
@@ -90,9 +91,13 @@ def _session_states() -> dict[str, str]:
     return {p["address"]: p.get("state") or "?" for p in peers} if isinstance(peers, list) else {}
 
 
-def _speaker_checks(db: Session, routes: list[dict], checks: list) -> None:
+def _speaker_checks(db: Session, routes: list[dict], checks: list, acceptance_peer: str | None = None) -> None:
+    """Which of Shield's BGP sessions would carry each route, and whether they may.
+    Staging sessions always may. Production sessions may only while production announcements are
+    switched on, and only after their acceptance run passed (except for that run's own canary)."""
     from ..models import BgpPurpose
     states = _session_states()
+    production_on = bool(get_setting(db, "bgp_production_enabled", False))
     for r in routes:
         q = select(BgpNeighbor).where(BgpNeighbor.router_id.is_(None), BgpNeighbor.managed_by_shield,
                                       BgpNeighbor.enabled)
@@ -104,20 +109,33 @@ def _speaker_checks(db: Session, routes: list[dict], checks: list) -> None:
             who = "your edge routers"
         sessions = db.execute(q).scalars().all()
         staging = [n for n in sessions if n.environment == "staging"]
-        if not staging:
-            _check(checks, "block", f"session_{r['peer']}",
-                   f"Shield has no staging BGP session to {who}." + (
-                       " Its sessions are marked production; production announcements start in phase 8."
-                       if sessions else " Add one under BGP sessions."))
+        prod = [n for n in sessions if n.environment == "production"] if production_on else []
+        canary = acceptance_peer == r["peer"]
+        unaccepted = [n for n in prod if n.acceptance_passed_at is None]
+        usable = staging + prod
+        code = f"session_{r['peer']}"
+        if not usable:
+            if sessions and not production_on:
+                _check(checks, "block", code, f"Shield's sessions to {who} are production sessions and production "
+                       "announcements are switched off (Settings).")
+            else:
+                _check(checks, "block", code, f"Shield has no BGP session to {who}. Add one under BGP sessions.")
             continue
-        down = [f"{n.neighbor_address} ({states.get(str(n.neighbor_address), 'unknown')})" for n in staging
+        if unaccepted and not canary:
+            _check(checks, "block", code,
+                   f"Production session(s) to {who} ({', '.join(n.name for n in unaccepted)}) have not passed an "
+                   "acceptance run. Run one from BGP sessions first.")
+            continue
+        down = [f"{n.neighbor_address} ({states.get(str(n.neighbor_address), 'unknown')})" for n in usable
                 if states.get(str(n.neighbor_address)) != "Established"]
+        kinds = " and ".join(x for x in (f"{len(prod)} production" if prod else "", f"{len(staging)} staging" if staging else "") if x)
         if down:
-            _check(checks, "warn", f"session_{r['peer']}",
+            _check(checks, "warn", code,
                    f"Session to {who} not established: {', '.join(down)}. The announcement fails unless it comes up.")
         else:
-            _check(checks, "ok", f"session_{r['peer']}",
-                   f"Announced by Shield's BGP speaker over {len(staging)} staging session(s) to {who}.")
+            _check(checks, "ok" if not prod else "warn", code,
+                   f"Announced by Shield's BGP speaker over {kinds} session(s) to {who}."
+                   + (" This is a real announcement." if prod else ""))
 
 
 def _live_load(net) -> dict:
@@ -260,7 +278,7 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
     # --- the BGP speaker ---------------------------------------------------------------------
     speaker = get_setting(db, "bgp_speaker", "simulated")
     if speaker == "frr" and routes:
-        _speaker_checks(db, routes, checks)
+        _speaker_checks(db, routes, checks, req.acceptance_peer)
 
     # --- limits and conflicts ----------------------------------------------------------------
     live_q = select(func.count()).select_from(RtbhRoute).where(RtbhRoute.status.in_(LIVE_ROUTE_STATES))
@@ -304,7 +322,7 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
     return Plan(
         target=target, strategy=req.strategy, blocked=blocked, routes=routes, checks=checks,
         duration_seconds=duration, protected_prefix_id=pp.id if pp else None,
-        simulation=speaker != "frr", speaker=speaker,
+        simulation=speaker != "frr", speaker=speaker, acceptance_peer=req.acceptance_peer,
         impact={"statements": impact, "addresses": net.num_addresses, "live": _live_load(net),
                 "customer": el.customer},
     )
