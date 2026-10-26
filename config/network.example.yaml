@@ -1,0 +1,80 @@
+# Example inventory for `python -m app.cli seed --file config/network.example.yaml`.
+# These are the initial example values from the project specification, NOT defaults
+# baked into the application. Replace every value with your real data.
+#
+# Seeding never enables mitigation: protected prefixes are created with rtbh/steering/
+# filtering disabled and RTBH policies are created disabled and unverified.
+
+local_asn: 154950
+
+routers:
+  - name: edge-r1
+    model: ccr2004
+    role: primary
+    mgmt_address: 10.255.0.1        # management VLAN address
+    api_port: 8729                  # API-SSL
+    notes: Primary CCR2004 – Upstream A
+  - name: edge-r2
+    model: ccr2004
+    role: secondary
+    mgmt_address: 10.255.0.2
+    api_port: 8729
+    notes: Secondary CCR2004 – Upstream B
+
+upstreams:
+  - name: Upstream-A
+    asn: 174                        # REPLACE with the provider's real ASN
+    description: Normal transit provider
+    router: edge-r1
+    interface: sfp-sfpplus1
+    capacity_mbps: 10000
+    rtbh_policy:
+      # REPLACE with values from Upstream A's RTBH documentation.
+      communities: ["174:666"]
+      min_prefix_len: 32
+      max_prefix_len: 32
+      max_routes: 20
+      documentation_ref: null       # set to the provider doc URL / ticket before verifying
+  - name: Upstream-B
+    asn: 6939                       # REPLACE
+    description: Secondary / DDoS-protected transit
+    router: edge-r2
+    interface: sfp-sfpplus1
+    capacity_mbps: 10000
+    ddos_protected: true
+
+bgp_neighbors:
+  - name: r1-upstream-a
+    router: edge-r1
+    upstream: Upstream-A
+    purpose: transit
+    remote_asn: 174
+    neighbor_address: 198.51.100.1  # REPLACE
+  - name: r2-upstream-b
+    router: edge-r2
+    upstream: Upstream-B
+    purpose: transit
+    remote_asn: 6939
+    neighbor_address: 203.0.113.1   # REPLACE
+  - name: shield-to-r1
+    purpose: rtbh_signal
+    remote_asn: 154950
+    neighbor_address: 10.255.0.1
+    local_address: 10.255.0.10
+    managed_by_shield: true
+    max_prefix_out: 50
+  - name: shield-to-r2
+    purpose: rtbh_signal
+    remote_asn: 154950
+    neighbor_address: 10.255.0.2
+    local_address: 10.255.0.10
+    managed_by_shield: true
+    max_prefix_out: 50
+
+protected_prefixes:
+  - prefix: 163.5.191.0/24
+    description: VPS block 1
+  - prefix: 77.107.95.0/24
+    description: Hosting block
+  - prefix: 163.52.252.0/23
+    description: Infrastructure + VPS

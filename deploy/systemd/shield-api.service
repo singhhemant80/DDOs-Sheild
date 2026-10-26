@@ -1,0 +1,44 @@
+[Unit]
+Description=Crapplet DDoS Shield management API
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User=shield
+Group=shield
+WorkingDirectory=/opt/crapplet-shield/backend
+EnvironmentFile=/etc/crapplet-shield/shield.env
+# Single worker: the in-process rate limiter and (Phase 6+) mitigator lock assume one process.
+ExecStart=/opt/crapplet-shield/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080 \
+    --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header
+Restart=on-failure
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

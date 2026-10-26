@@ -1,0 +1,17 @@
+[Unit]
+Description=Crapplet DDoS Shield maintenance (retention purge + audit chain verification)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=shield
+Group=shield
+WorkingDirectory=/opt/crapplet-shield/backend
+EnvironmentFile=/etc/crapplet-shield/shield.env
+ExecStart=/opt/crapplet-shield/venv/bin/python -m app.cli purge-retention
+# Non-zero exit (broken chain) marks the unit failed -> visible in `systemctl --failed` / monitoring.
+ExecStart=/opt/crapplet-shield/venv/bin/python -m app.cli verify-audit
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
