@@ -46,11 +46,24 @@ def health_details(_: Principal = Depends(require(Perm.VIEW)), db: Session = Dep
             "redis": "up" if tm.redis_ok() else "down",
             "clickhouse": "up" if tm.clickhouse_ok() else "down",
             "collector": _collector_state(),
-            "detector": "not_installed",          # Phase 4
+            "detector": _detector_state(),
             "mikrotik_adapter": "not_installed",  # Phase 5
             "mitigator": "not_installed",         # Phase 6
         },
     }
+
+
+def _detector_state() -> str:
+    try:
+        raw = tm.rds().get("shield:detector:status")
+    except Exception:
+        return "down"
+    if not raw:
+        return "down"
+    import json
+    st = json.loads(raw)
+    lag = st.get("lag_seconds")
+    return "degraded" if st.get("in_data_gap") or (lag is not None and lag > 10) else "up"
 
 
 def _collector_state() -> str:

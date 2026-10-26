@@ -61,8 +61,17 @@ def _clean(_schema):
         c.execute(text("ALTER TABLE audit_log DISABLE TRIGGER trg_audit_immutable"))
         c.execute(text("TRUNCATE " + ", ".join(tables) + " RESTART IDENTITY CASCADE"))
         c.execute(text("ALTER TABLE audit_log ENABLE TRIGGER trg_audit_immutable"))
+        from app.models import DEFAULT_PROFILE
+        timers = dict(baseline_factor=4, anomaly_min_pps=20000, suspect_hits=3, suspect_window=5, confirm_seconds=20,
+                      confirm_confidence=0.7, release_seconds=120, suspect_timeout_seconds=60)
+        cols = ["name", "scope", "enabled", "is_default", *DEFAULT_PROFILE, *timers]
+        for name, scope in (("Default IPv4", "0.0.0.0/0"), ("Default IPv6", "::/0")):
+            vals = {"name": name, "scope": scope, "enabled": True, "is_default": True, **DEFAULT_PROFILE, **timers}
+            c.execute(text(f"INSERT INTO detection_profiles ({', '.join(cols)}) VALUES "
+                           f"({', '.join(':' + k for k in cols)})"), vals)
         for k, (v, _) in DEFAULT_SETTINGS.items():
-            c.execute(text("UPDATE system_settings SET value = CAST(:v AS jsonb) WHERE key = :k"),
+            c.execute(text("INSERT INTO system_settings (key, value) VALUES (:k, CAST(:v AS jsonb)) "
+                           "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"),
                       {"k": k, "v": __import__("json").dumps(v)})
 
 

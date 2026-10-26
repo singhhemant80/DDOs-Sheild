@@ -485,13 +485,106 @@ class AttackIncident(TimestampMixin, Base):
     acknowledged_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
+    # Phase 4
+    scope: Mapped[str] = mapped_column(String(8), nullable=False, server_default="host")
+    profile_id: Mapped[int | None] = mapped_column(ForeignKey("detection_profiles.id", ondelete="SET NULL"))
+    resolution: Mapped[str | None] = mapped_column(String(24))
+    last_hot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict)
+    confidence_breakdown: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"),
+                                                       default=dict)
 
     __table_args__ = (
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_incident_confidence"),
+        CheckConstraint("scope IN ('host', 'prefix')", name="ck_incident_scope"),
+        CheckConstraint(
+            "resolution IS NULL OR resolution IN ('ended', 'cleared_unconfirmed', 'false_positive', 'superseded')",
+            name="ck_incident_resolution"),
         Index("ix_incidents_status", "status"),
         Index("ix_incidents_first_detected", "first_detected_at"),
         Index("ix_incidents_target_gist", "target", postgresql_using="gist", postgresql_ops={"target": "inet_ops"}),
+        # At most one open incident per target: the detector updates it rather than opening duplicates.
+        Index("uq_incidents_open_target", "target", unique=True,
+              postgresql_where=text("status IN ('suspected','confirmed','mitigating','mitigated')")),
     )
+
+
+OPEN_INCIDENT_STATES = ("suspected", "confirmed", "mitigating", "mitigated")
+
+
+class AttackIncidentEvent(Base):
+    """Timeline: suspected, confirmed, severity/vector changes, data gaps, operator actions, resolution."""
+
+    __tablename__ = "attack_incident_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("attack_incidents.id", ondelete="CASCADE"), nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False, default="detector")
+    detail: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    __table_args__ = (Index("ix_incident_events_incident_at", "incident_id", "at"),)
+
+
+class DetectionProfile(TimestampMixin, Base):
+    """Detection thresholds and timers for a scope. The most specific enabled profile containing a
+    destination applies; the 0.0.0.0/0 and ::/0 defaults always exist. Threshold NULL = check off.
+    All rates are per second, after sampling has been scaled up."""
+
+    __tablename__ = "detection_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    scope: Mapped[str] = mapped_column(CIDR, nullable=False, unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Per destination address
+    dst_pps: Mapped[int | None] = mapped_column(BigInteger)
+    dst_bps: Mapped[int | None] = mapped_column(BigInteger)
+    syn_pps: Mapped[int | None] = mapped_column(BigInteger)
+    tcp_flag_pps: Mapped[int | None] = mapped_column(BigInteger)   # ACK-only / RST floods
+    udp_pps: Mapped[int | None] = mapped_column(BigInteger)
+    icmp_pps: Mapped[int | None] = mapped_column(BigInteger)
+    reflect_pps: Mapped[int | None] = mapped_column(BigInteger)    # from one amplification source port
+    frag_pps: Mapped[int | None] = mapped_column(BigInteger)
+    # Whole protected prefix (carpet bombing)
+    prefix_pps: Mapped[int | None] = mapped_column(BigInteger)
+    prefix_bps: Mapped[int | None] = mapped_column(BigInteger)
+    # Learned baseline
+    baseline_factor: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False, default=Decimal("4.00"))
+    anomaly_min_pps: Mapped[int] = mapped_column(BigInteger, nullable=False, default=20000)
+    # Timers / decision rules
+    suspect_hits: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=3)
+    suspect_window: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=5)
+    confirm_seconds: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=20)
+    confirm_confidence: Mapped[Decimal] = mapped_column(Numeric(4, 3), nullable=False, default=Decimal("0.700"))
+    release_seconds: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=120)
+    suspect_timeout_seconds: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=60)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint("suspect_hits BETWEEN 1 AND suspect_window AND suspect_window BETWEEN 1 AND 60",
+                        name="ck_profile_suspect"),
+        CheckConstraint("confirm_seconds BETWEEN 3 AND 600", name="ck_profile_confirm"),
+        CheckConstraint("release_seconds BETWEEN 10 AND 3600 AND suspect_timeout_seconds BETWEEN 10 AND 3600",
+                        name="ck_profile_release"),
+        CheckConstraint("confirm_confidence > 0 AND confirm_confidence <= 1", name="ck_profile_confidence"),
+        CheckConstraint("baseline_factor >= 1", name="ck_profile_baseline_factor"),
+        CheckConstraint(
+            "coalesce(dst_pps,1) > 0 AND coalesce(dst_bps,1) > 0 AND coalesce(syn_pps,1) > 0 AND "
+            "coalesce(tcp_flag_pps,1) > 0 AND coalesce(udp_pps,1) > 0 AND coalesce(icmp_pps,1) > 0 AND "
+            "coalesce(reflect_pps,1) > 0 AND coalesce(frag_pps,1) > 0 AND coalesce(prefix_pps,1) > 0 AND "
+            "coalesce(prefix_bps,1) > 0", name="ck_profile_positive"),
+        CheckConstraint("NOT is_default OR masklen(scope) = 0", name="ck_profile_default_scope"),
+    )
+
+
+# Starting values. Conservative for a hosting network; tune per prefix/customer in the dashboard.
+DEFAULT_PROFILE = dict(
+    dst_pps=100_000, dst_bps=1_000_000_000, syn_pps=50_000, tcp_flag_pps=100_000, udp_pps=100_000,
+    icmp_pps=20_000, reflect_pps=20_000, frag_pps=20_000, prefix_pps=500_000, prefix_bps=5_000_000_000,
+)
 
 
 class DetectionEvidence(Base):
@@ -752,4 +845,5 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "retention_login_attempts_days": (180, "Retention for login_attempts rows."),
     "retention_system_health_days": (30, "Retention for system_health rows."),
     "retention_notifications_days": (90, "Retention for notifications rows."),
+    "false_positive_suppress_minutes": (30, "After an incident is marked a false positive, how long the same target is not re-reported."),
 }

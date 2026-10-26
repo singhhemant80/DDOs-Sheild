@@ -47,6 +47,10 @@ def eligibility(target: str = Query(..., description="IP address or prefix"),
         net = nv.parse_target(target)
     except ValueError as e:
         raise HTTPException(422, str(e)) from None
+    return eligibility_for(db, net)
+
+
+def eligibility_for(db: Session, net) -> EligibilityOut:
     pp = db.execute(
         select(ProtectedPrefix).where(cast(str(net), CIDR).op("<<=")(ProtectedPrefix.prefix))
     ).scalar_one_or_none()

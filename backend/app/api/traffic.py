@@ -24,6 +24,7 @@ from ..rbac import Perm, has_perm
 
 log = logging.getLogger("shield.ws")
 router = APIRouter(tags=["traffic"])
+CHAN_EVENTS = "shield:events"
 
 
 @router.get("/traffic/live")
@@ -165,7 +166,9 @@ async def ws_traffic(ws: WebSocket):
     """Live stream of one-second snapshots.
 
     Protocol: connect, then send {"token": "<access token>"} within 5 seconds. The server replies
-    {"type":"ready"} and then {"type":"traffic","data":{...}} every second. The session is
+    {"type":"ready"}, then {"type":"traffic","data":{...}} every second and
+    {"type":"incident","event":"suspected|confirmed|update|escalated|resolved|...","incident":{...}}
+    as incidents change. The session is
     re-validated every 30s; logout, revocation or a disabled account closes the socket (4401).
     Tokens are sent in a message, not the URL, so they never land in proxy access logs.
     """
@@ -188,7 +191,7 @@ async def ws_traffic(ws: WebSocket):
     try:
         await ws.send_json({"type": "ready"})
         try:
-            await pubsub.subscribe(tm.CHAN_TRAFFIC)
+            await pubsub.subscribe(tm.CHAN_TRAFFIC, CHAN_EVENTS)
         except redis.RedisError:
             await ws.send_json({"type": "status", "available": False, "reason": "Redis unavailable"})
             await ws.close(code=1011)
@@ -206,6 +209,9 @@ async def ws_traffic(ws: WebSocket):
                 m = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                 now = time.monotonic()
                 if m and m.get("type") == "message":
+                    if m.get("channel") == CHAN_EVENTS:
+                        await ws.send_text(m["data"])  # already {"type":"incident",...}
+                        continue
                     await ws.send_text('{"type":"traffic","data":' + m["data"] + "}")
                     last_msg = now
                 elif now - last_msg > 3:

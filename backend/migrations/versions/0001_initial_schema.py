@@ -541,8 +541,18 @@ def upgrade() -> None:
     """)
 
     # --- Default settings ---------------------------------------------------------------
-    import json
-    from app.models import DEFAULT_SETTINGS
+    # Frozen copy: migrations must not change when application defaults change later.
+    DEFAULT_SETTINGS = {
+        "automation_enabled": (False, "Master switch for automatic mitigation. Off by default."),
+        "rtbh_emergency_disable": (False, "When true, no new RTBH announcements are permitted."),
+        "global_max_rtbh_routes": (50, "Hard ceiling on simultaneously announced RTBH routes."),
+        "require_mfa_for_admin": (False, "Require TOTP MFA for administrator logins."),
+        "require_mfa_for_mitigation": (False, "Require an MFA-verified session to approve mitigations."),
+        "retention_flow_summaries_days": (30, "Retention for flow_summaries rows."),
+        "retention_login_attempts_days": (180, "Retention for login_attempts rows."),
+        "retention_system_health_days": (30, "Retention for system_health rows."),
+        "retention_notifications_days": (90, "Retention for notifications rows."),
+    }
     settings_t = sa.table("system_settings", sa.column("key", sa.String), sa.column("value", postgresql.JSONB),
                           sa.column("description", sa.Text))
     op.bulk_insert(settings_t, [{"key": k, "value": v, "description": d} for k, (v, d) in DEFAULT_SETTINGS.items()])

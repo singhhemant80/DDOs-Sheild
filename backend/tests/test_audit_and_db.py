@@ -110,4 +110,11 @@ def test_db_rejects_enabling_unverified_rtbh_policy(db):
 def test_health_endpoints(client, engineer):
     assert client.get("/api/v1/health").json() == {"status": "ok"}
     d = client.get("/api/v1/health/details", headers=engineer).json()
-    assert d["schema_revision"] == "0001" and d["automation_enabled"] is False
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    import os
+    here = os.path.dirname(__file__)
+    cfg = Config(os.path.join(here, "..", "alembic.ini"))
+    cfg.set_main_option("script_location", os.path.join(here, "..", "migrations"))
+    assert d["schema_revision"] == ScriptDirectory.from_config(cfg).get_current_head()
+    assert d["automation_enabled"] is False
