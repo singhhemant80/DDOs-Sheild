@@ -1,0 +1,64 @@
+# managed-by: crapplet-shield-installer
+# Generated from deploy/nginx/crapplet-shield.conf.tmpl. Remove the first line to stop the
+# installer from rewriting this file on upgrade.
+
+limit_req_zone $binary_remote_addr zone=shield_api:10m rate=30r/s;
+
+map $http_upgrade $shield_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name _;
+@ALLOW@    deny all;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name _;
+
+    ssl_certificate     /etc/crapplet-shield/tls/shield.crt;
+    ssl_certificate_key /etc/crapplet-shield/tls/shield.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_tickets off;
+
+    # Management networks only (SHIELD_MGMT_NETS at install time). Everything else gets 403.
+@ALLOW@    allow 127.0.0.1;
+    deny all;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+
+    client_max_body_size 1m;
+
+    location /api/ {
+        limit_req zone=shield_api burst=60 nodelay;
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $shield_connection_upgrade;
+        proxy_read_timeout 75s;
+    }
+
+    location /assets/ {
+        root /opt/crapplet-shield/frontend/dist;
+        expires 30d;   # hashed file names; no add_header here or the server-level security headers are dropped
+    }
+
+    location / {
+        root /opt/crapplet-shield/frontend/dist;
+        try_files $uri /index.html;
+        expires -1;
+    }
+}

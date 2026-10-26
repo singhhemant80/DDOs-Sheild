@@ -6,6 +6,7 @@ set -euo pipefail
 BACKUP_DIR=${BACKUP_DIR:-/var/backups/crapplet-shield}
 KEEP_DAYS=${KEEP_DAYS:-14}
 DB=${DB:-shield}
+# shellcheck source=/dev/null
 [ -f /etc/crapplet-shield/backup.env ] && . /etc/crapplet-shield/backup.env
 
 umask 077

@@ -1,156 +1,262 @@
 #!/usr/bin/env bash
-# Crapplet DDoS Shield installer (Ubuntu 22.04/24.04; AlmaLinux 9 best-effort).
-# Idempotent: safe to re-run for upgrades. Run from the repository root as root, after
-# building artifacts with `make` (collector/bin/* and frontend/dist) on a build machine.
+# Crapplet DDoS Shield - server installer. Usually run for you by the one-command installer
+# (install.sh at the repository root). Can also be run directly from an unpacked release bundle
+# or a built source tree (`make`):
+#
+#   sudo deploy/scripts/install.sh
+#
+# Idempotent: re-running upgrades code and services and never overwrites secrets, users or config.
+# Supported: Ubuntu 22.04 / 24.04, Debian 12. AlmaLinux / Rocky 9: best effort.
+#
+# Options (environment variables):
+#   SHIELD_ADMIN_USER       first administrator's username (default: admin). Only used on first install.
+#   SHIELD_ADMIN_PASSWORD   their password (default: generated and shown once)
+#   SHIELD_MGMT_NETS        space-separated networks allowed to open the dashboard
+#                           (default: "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16")
+#   SHIELD_SEED_EXAMPLE=1   load config/network.example.yaml (AS154950 example values) on first install
 set -euo pipefail
 
 PREFIX=/opt/crapplet-shield
 ETC=/etc/crapplet-shield
 SRC=$(cd "$(dirname "$0")/../.." && pwd)
+CREDS_FILE=/root/crapplet-shield-admin.txt
+MGMT_NETS=${SHIELD_MGMT_NETS:-"10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"}
 
-[ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
+say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+note() { printf '    %s\n' "$*"; }
+die()  { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+as()   { local u=$1; shift; runuser -u "$u" -- "$@"; }
+rand() { openssl rand -hex "${1:-24}"; }
 
-echo "==> Packages"
+[ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
+{ command -v systemctl >/dev/null && [ -d /run/systemd/system ]; } || die "systemd is required"
+[ -f "$SRC/backend/pyproject.toml" ] || die "run from the Shield source tree or release bundle"
+for n in $MGMT_NETS; do
+  [[ $n =~ ^[0-9a-fA-F:.]+(/[0-9]{1,3})?$ ]] || die "SHIELD_MGMT_NETS: '$n' is not an address or network"
+done
+
+# ---------------------------------------------------------------- packages
+say "Installing system packages"
 if command -v apt-get >/dev/null; then
+  export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq python3 python3-venv python3-dev postgresql postgresql-contrib nginx gnupg curl \
-    redis-server rsync >/dev/null
+  apt-get install -y -qq ca-certificates curl gnupg openssl rsync nginx postgresql postgresql-contrib \
+    redis-server >/dev/null
+  PY=""
+  for v in python3.13 python3.12 python3.11; do command -v "$v" >/dev/null && { PY=$v; break; }; done
+  if [ -z "$PY" ]; then   # Ubuntu 22.04 ships 3.10; 3.11 is in its standard repositories
+    apt-get install -y -qq python3.11 python3.11-venv python3.11-dev >/dev/null
+    PY=python3.11
+  fi
+  apt-get install -y -qq "${PY}-venv" >/dev/null 2>&1 || apt-get install -y -qq python3-venv >/dev/null
   if ! command -v clickhouse-server >/dev/null; then
-    echo "    adding the official ClickHouse LTS apt repository"
+    note "adding the official ClickHouse LTS repository"
     curl -fsSL https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key \
       | gpg --dearmor --yes -o /usr/share/keyrings/clickhouse-keyring.gpg
     echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=$(dpkg --print-architecture)] https://packages.clickhouse.com/deb lts main" \
       > /etc/apt/sources.list.d/clickhouse.list
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clickhouse-server clickhouse-client >/dev/null
+    apt-get install -y -qq clickhouse-server clickhouse-client >/dev/null
   fi
+  REDIS_UNIT=redis-server
+  NGINX_SITE=/etc/nginx/sites-available/crapplet-shield.conf
+  NGINX_LINK=/etc/nginx/sites-enabled/crapplet-shield.conf
 elif command -v dnf >/dev/null; then
-  dnf install -y -q python3.11 postgresql-server postgresql-contrib nginx gnupg2 redis rsync
-  command -v clickhouse-server >/dev/null || { echo "Install ClickHouse LTS first: https://clickhouse.com/docs/en/install"; exit 1; }
+  dnf install -y -q ca-certificates curl gnupg2 openssl rsync nginx postgresql-server postgresql-contrib \
+    redis python3.11 python3.11-devel
+  PY=python3.11
   [ -d /var/lib/pgsql/data/base ] || postgresql-setup --initdb
-  systemctl enable --now postgresql
+  if ! command -v clickhouse-server >/dev/null; then
+    dnf install -y -q yum-utils
+    yum-config-manager -y --add-repo https://packages.clickhouse.com/rpm/lts/clickhouse.repo >/dev/null
+    dnf install -y -q clickhouse-server clickhouse-client
+  fi
+  REDIS_UNIT=redis
+  NGINX_SITE=/etc/nginx/conf.d/crapplet-shield.conf
+  NGINX_LINK=""
+else
+  die "unsupported distribution (need apt or dnf)"
 fi
-PG_MAJOR=$(psql --version | awk '{print $3}' | cut -d. -f1)
-[ "$PG_MAJOR" -ge 14 ] || { echo "PostgreSQL >= 14 required (found $PG_MAJOR)"; exit 1; }
+systemctl enable --now postgresql >/dev/null 2>&1 || true
+PG_MAJOR=$(as postgres psql -tAc "show server_version" | cut -d. -f1)
+[ "${PG_MAJOR:-0}" -ge 14 ] || die "PostgreSQL >= 14 required (found ${PG_MAJOR:-none})"
+note "$($PY --version), PostgreSQL $PG_MAJOR"
 
-echo "==> Service user"
+# ---------------------------------------------------------------- code
+say "Installing Crapplet Shield $(cat "$SRC/VERSION" 2>/dev/null || echo "(source build)")"
 id shield >/dev/null 2>&1 || useradd --system --home-dir "$PREFIX" --shell /usr/sbin/nologin shield
-
-echo "==> Code"
-install -d -o root -g root -m 0755 "$PREFIX"
-rsync -a --delete --exclude '.git' --exclude '__pycache__' --exclude '.venv' "$SRC/backend" "$SRC/deploy" "$SRC/config" "$PREFIX/"
+[ -x "$SRC/collector/bin/shield-collector" ] || die "collector binaries missing (use a release bundle or run 'make')"
+[ -f "$SRC/frontend/dist/index.html" ] || die "dashboard build missing (use a release bundle or run 'make')"
+install -d -m 0755 "$PREFIX" "$PREFIX/bin" "$PREFIX/frontend" "$PREFIX/clickhouse"
+rsync -a --delete --exclude '.git' --exclude '__pycache__' --exclude '.venv' --exclude 'node_modules' \
+  "$SRC/backend" "$SRC/deploy" "$SRC/config" "$SRC/docs" "$PREFIX/"
 chmod 0755 "$PREFIX"/deploy/scripts/*.sh
-install -d -m 0755 "$PREFIX/bin" "$PREFIX/frontend" "$PREFIX/clickhouse"
-if ls "$SRC"/collector/bin/shield-collector >/dev/null 2>&1; then
-  install -m 0755 "$SRC"/collector/bin/shield-* "$PREFIX/bin/"
-else
-  echo "    WARNING: collector/bin is empty - run 'make collector' first; collector not installed"
-fi
+install -m 0755 "$SRC"/collector/bin/shield-* "$PREFIX/bin/"
+rsync -a --delete "$SRC/frontend/dist" "$PREFIX/frontend/"
 cp "$SRC"/collector/clickhouse/*.sql "$PREFIX/clickhouse/"
-if [ -f "$SRC/frontend/dist/index.html" ]; then
-  rsync -a --delete "$SRC/frontend/dist" "$PREFIX/frontend/"
-else
-  echo "    WARNING: frontend/dist missing - run 'make frontend' first; dashboard not installed"
-fi
+if [ -f "$SRC/VERSION" ]; then cp "$SRC/VERSION" "$PREFIX/VERSION"; fi
 
-echo "==> Python venv"
-[ -d "$PREFIX/venv" ] || python3 -m venv "$PREFIX/venv"
+if [ -d "$PREFIX/venv" ] && ! "$PREFIX/venv/bin/python" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+  rm -rf "$PREFIX/venv"   # built with a Python that is too old
+fi
+[ -d "$PREFIX/venv" ] || "$PY" -m venv "$PREFIX/venv"
 "$PREFIX/venv/bin/pip" install -q --upgrade pip
 "$PREFIX/venv/bin/pip" install -q "$PREFIX/backend"
 
-echo "==> Config"
+# ---------------------------------------------------------------- secrets & config
+say "Configuration and secrets"
 install -d -o root -g shield -m 0750 "$ETC" "$ETC/tls"
+FIRST_INSTALL=0
+NEW_DB_PW=""; NEW_REDIS_PW=""; NEW_CH_PW=""
 if [ ! -f "$ETC/shield.env" ]; then
-  dbpw=$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')
-  sk=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
+  FIRST_INSTALL=1
+  NEW_DB_PW=$(rand 24)
   ck=$("$PREFIX/venv/bin/python" -c 'from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())')
-  sed -e "s|CHANGE_ME_DB_PASSWORD|$dbpw|" -e "s|CHANGE_ME_GENERATE_A_LONG_RANDOM_VALUE|$sk|" \
+  sed -e "s|CHANGE_ME_DB_PASSWORD|$NEW_DB_PW|" -e "s|CHANGE_ME_GENERATE_A_LONG_RANDOM_VALUE|$(rand 48)|" \
       -e "s|^SHIELD_CREDENTIAL_KEY=.*|SHIELD_CREDENTIAL_KEY=$ck|" \
       "$PREFIX/deploy/env/shield.env.example" > "$ETC/shield.env"
-  chown root:shield "$ETC/shield.env"; chmod 0640 "$ETC/shield.env"
-  echo "    generated $ETC/shield.env — BACK UP SHIELD_CREDENTIAL_KEY separately"
-  NEW_DB_PW=$dbpw
+  note "generated $ETC/shield.env (back up SHIELD_CREDENTIAL_KEY separately from database backups)"
 fi
 if ! grep -q '^SHIELD_REDIS_URL=' "$ETC/shield.env"; then
-  rpw=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
-  cpw=$(python3 -c 'import secrets;print(secrets.token_hex(24))')
+  NEW_REDIS_PW=$(rand 24); NEW_CH_PW=$(rand 24)
   cat >> "$ETC/shield.env" <<ENV
-SHIELD_REDIS_URL=redis://:$rpw@127.0.0.1:6379/0
+SHIELD_REDIS_URL=redis://:$NEW_REDIS_PW@127.0.0.1:6379/0
 SHIELD_CLICKHOUSE_URL=http://127.0.0.1:8123
 SHIELD_CLICKHOUSE_USER=shield
-SHIELD_CLICKHOUSE_PASSWORD=$cpw
+SHIELD_CLICKHOUSE_PASSWORD=$NEW_CH_PW
 ENV
-  printf 'SHIELD_REDIS_PASSWORD=%s\nSHIELD_CLICKHOUSE_PASSWORD=%s\n' "$rpw" "$cpw" > "$ETC/collector.env"
-  chown root:shield "$ETC/collector.env"; chmod 0640 "$ETC/collector.env"
-  NEW_REDIS_PW=$rpw
-  NEW_CH_PW=$cpw
+  printf 'SHIELD_REDIS_PASSWORD=%s\nSHIELD_CLICKHOUSE_PASSWORD=%s\n' "$NEW_REDIS_PW" "$NEW_CH_PW" > "$ETC/collector.env"
 fi
+chown root:shield "$ETC/shield.env" "$ETC/collector.env"
+chmod 0640 "$ETC/shield.env" "$ETC/collector.env"
 for f in collector snmp-poller; do
-  [ -f "$ETC/$f.json" ] || install -o root -g shield -m 0640 "$PREFIX/deploy/collector/$f.example.json" "$ETC/$f.json.example"
+  install -o root -g shield -m 0640 "$PREFIX/deploy/collector/$f.example.json" "$ETC/$f.json.example"
 done
 
-echo "==> Redis (localhost only, password required)"
-RCONF=/etc/redis/redis.conf; [ -f "$RCONF" ] || RCONF=/etc/redis.conf
-if [ -n "${NEW_REDIS_PW:-}" ]; then
-  sed -i -e 's/^#\? *requirepass .*/requirepass '"$NEW_REDIS_PW"'/' -e 's/^bind .*/bind 127.0.0.1 -::1/' "$RCONF"
-  grep -q '^requirepass' "$RCONF" || echo "requirepass $NEW_REDIS_PW" >> "$RCONF"
+# ---------------------------------------------------------------- PostgreSQL
+say "PostgreSQL"
+if ! as postgres psql -tAc "select 1 from pg_roles where rolname='shield'" | grep -q 1; then
+  [ -n "$NEW_DB_PW" ] || die "shield.env exists but the 'shield' database role does not; restore it or remove $ETC/shield.env"
+  as postgres psql -q -v ON_ERROR_STOP=1 -c "CREATE ROLE shield LOGIN PASSWORD '$NEW_DB_PW'"
 fi
-systemctl enable --now redis-server 2>/dev/null || systemctl enable --now redis
-systemctl restart redis-server 2>/dev/null || systemctl restart redis
+as postgres psql -tAc "select 1 from pg_database where datname='shield'" | grep -q 1 || as postgres createdb -O shield shield
+run_shield() {  # run a command as the shield user with shield.env loaded
+  # shellcheck source=/dev/null
+  (cd "$PREFIX/backend" && set -a && . "$ETC/shield.env" && set +a && \
+    runuser -u shield --preserve-environment -- "$@")
+}
+run_shield "$PREFIX/venv/bin/alembic" upgrade head
+note "schema up to date"
 
-echo "==> ClickHouse"
-systemctl enable --now clickhouse-server
-for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8123/ping >/dev/null 2>&1 && break; sleep 1; done
+# ---------------------------------------------------------------- Redis
+say "Redis (localhost only, password required)"
+RCONF=/etc/redis/redis.conf; [ -f "$RCONF" ] || RCONF=/etc/redis.conf
+if [ -n "$NEW_REDIS_PW" ]; then
+  sed -i -e '/^#\? *requirepass /d' -e 's/^bind .*/bind 127.0.0.1 -::1/' "$RCONF"
+  echo "requirepass $NEW_REDIS_PW" >> "$RCONF"
+fi
+systemctl enable "$REDIS_UNIT" >/dev/null 2>&1
+systemctl restart "$REDIS_UNIT"
+
+# ---------------------------------------------------------------- ClickHouse
+say "ClickHouse"
+systemctl enable clickhouse-server >/dev/null 2>&1
+systemctl start clickhouse-server
+for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:8123/ping >/dev/null 2>&1 && break; sleep 1; done
+curl -fsS http://127.0.0.1:8123/ping >/dev/null || die "ClickHouse did not start (journalctl -u clickhouse-server)"
 clickhouse-client --multiquery < "$PREFIX/clickhouse/001_schema.sql"
-if [ -n "${NEW_CH_PW:-}" ]; then
+if [ -n "$NEW_CH_PW" ]; then
   clickhouse-client -q "CREATE USER IF NOT EXISTS shield IDENTIFIED WITH sha256_password BY '$NEW_CH_PW' HOST LOCAL"
   clickhouse-client -q "GRANT SELECT, INSERT ON shield.* TO shield"
 fi
+note "schema applied"
 
-echo "==> Kernel UDP buffers"
+# ---------------------------------------------------------------- services
+say "Services"
 install -m 0644 "$PREFIX/deploy/sysctl/90-shield.conf" /etc/sysctl.d/90-shield.conf
-sysctl -q --system || true
-
-echo "==> Database"
-if ! sudo -u postgres psql -tAc "select 1 from pg_roles where rolname='shield'" | grep -q 1; then
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE ROLE shield LOGIN PASSWORD '${NEW_DB_PW:?existing shield.env but no shield role; create it manually}'"
-fi
-sudo -u postgres psql -tAc "select 1 from pg_database where datname='shield'" | grep -q 1 || \
-  sudo -u postgres createdb -O shield shield
-
-echo "==> Migrations"
-( cd "$PREFIX/backend" && set -a && . "$ETC/shield.env" && set +a && \
-  sudo -E -u shield "$PREFIX/venv/bin/alembic" upgrade head )
-
-echo "==> systemd"
+sysctl -q --system >/dev/null 2>&1 || true
 install -m 0644 "$PREFIX"/deploy/systemd/*.service "$PREFIX"/deploy/systemd/*.timer /etc/systemd/system/
 install -d -o postgres -g postgres -m 0700 /var/backups/crapplet-shield
 systemctl daemon-reload
-systemctl enable --now shield-api.service shield-maintenance.timer shield-backup.timer
+systemctl enable shield-api.service shield-maintenance.timer shield-backup.timer >/dev/null 2>&1
 systemctl restart shield-api.service
+systemctl start shield-maintenance.timer shield-backup.timer
 for f in collector snmp-poller; do
-  if [ -f "$ETC/$f.json" ] && [ -x "$PREFIX/bin/shield-$f" ]; then
-    systemctl enable "shield-$f.service"; systemctl restart "shield-$f.service"
+  if [ -f "$ETC/$f.json" ]; then
+    systemctl enable "shield-$f.service" >/dev/null 2>&1
+    systemctl restart "shield-$f.service"
   fi
 done
+for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 && break; sleep 1; done
+curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null || die "API did not start (journalctl -u shield-api)"
+note "API healthy"
 
-echo "==> Health"
-for i in $(seq 1 20); do
-  curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 && { echo "    API healthy"; break; }
-  sleep 1
-done
+# ---------------------------------------------------------------- first administrator
+say "Administrator account"
+ADMIN_USER=${SHIELD_ADMIN_USER:-admin}
+ADMIN_PW=${SHIELD_ADMIN_PASSWORD:-}
+GENERATED_PW=0
+if [ -z "$ADMIN_PW" ]; then ADMIN_PW="Sh-$(rand 9)-$(rand 3)"; GENERATED_PW=1; fi
+out=$(printf '%s\n' "$ADMIN_PW" | run_shield "$PREFIX/venv/bin/python" -m app.cli create-admin \
+  --username "$ADMIN_USER" --if-none --password-stdin)
+note "$out"
+CREATED_ADMIN=0
+case "$out" in *created.*) CREATED_ADMIN=1 ;; esac
+if [ "$CREATED_ADMIN" = 1 ] && [ "$GENERATED_PW" = 1 ]; then
+  (umask 077 && printf 'Crapplet Shield administrator\nusername: %s\npassword: %s\n' "$ADMIN_USER" "$ADMIN_PW" > "$CREDS_FILE")
+fi
+if [ "$FIRST_INSTALL" = 1 ] && [ "${SHIELD_SEED_EXAMPLE:-0}" = 1 ]; then
+  run_shield "$PREFIX/venv/bin/python" -m app.cli seed --file "$PREFIX/config/network.example.yaml"
+fi
 
+# ---------------------------------------------------------------- HTTPS dashboard
+say "Dashboard (HTTPS)"
+IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [ ! -f "$ETC/tls/shield.crt" ]; then
+  openssl req -x509 -newkey rsa:3072 -sha256 -days 825 -nodes -subj "/CN=$(hostname)" \
+    -addext "subjectAltName=DNS:$(hostname),DNS:localhost${IP:+,IP:$IP},IP:127.0.0.1" \
+    -keyout "$ETC/tls/shield.key" -out "$ETC/tls/shield.crt" >/dev/null 2>&1
+  chmod 0600 "$ETC/tls/shield.key"
+  note "created a self-signed certificate; replace $ETC/tls/shield.crt and .key with your own when ready"
+fi
+if [ ! -f "$NGINX_SITE" ] || grep -q 'managed-by: crapplet-shield-installer' "$NGINX_SITE"; then
+  allow=""
+  for n in $MGMT_NETS; do allow="${allow}    allow $n;\n"; done
+  sed -e "s|@ALLOW@|$allow|" "$PREFIX/deploy/nginx/crapplet-shield.conf.tmpl" > "$NGINX_SITE"
+  if [ -n "$NGINX_LINK" ]; then ln -sf "$NGINX_SITE" "$NGINX_LINK"; fi
+fi
+if ! nginx -t >/dev/null 2>&1; then nginx -t; die "nginx configuration test failed"; fi
+systemctl enable nginx >/dev/null 2>&1
+systemctl reload nginx 2>/dev/null || systemctl restart nginx
+
+# ---------------------------------------------------------------- summary
+say "Done"
 cat <<EOF
 
-Installed. Next steps:
-  1. Create the first administrator:
-       cd $PREFIX/backend && sudo -u shield env \$(grep -v '^#' $ETC/shield.env | xargs) \\
-         $PREFIX/venv/bin/python -m app.cli create-admin --username <you>
-  2. Put a TLS certificate in $ETC/tls/, edit deploy/nginx/crapplet-shield.conf (listen address,
-     allow-list) and install it into /etc/nginx/sites-enabled/.
-  3. Host firewall: allow 443/tcp from management networks only (see deploy/README.md).
-  4. Optionally seed inventory: python -m app.cli seed --file $PREFIX/config/network.example.yaml
-  5. Flow collection: copy $ETC/collector.json.example to $ETC/collector.json, list your routers
-     as exporters, then: systemctl enable --now shield-collector   (router setup: docs/collector.md)
-  6. Interface counters: same for snmp-poller.json, then: systemctl enable --now shield-snmp-poller
+  Dashboard:    https://${IP:-<this-server>}/
+                (self-signed certificate: your browser warns until you install a real one)
+  Allowed from: $MGMT_NETS
+EOF
+if [ "$CREATED_ADMIN" = 1 ]; then
+  if [ "$GENERATED_PW" = 1 ]; then
+    cat <<EOF
+  Sign in as:   $ADMIN_USER
+  Password:     $ADMIN_PW
+                (also saved in $CREDS_FILE, root only; delete it after signing in)
+EOF
+  else
+    echo "  Sign in as:   $ADMIN_USER with the password you provided"
+  fi
+  echo "  Then turn on two-factor authentication under Settings."
+fi
+cat <<EOF
+
+  Next:
+    1. Point your routers' flow export at this server ($PREFIX/docs/collector.md)
+    2. cp $ETC/collector.json.example $ETC/collector.json, list your routers as exporters,
+       then: systemctl enable --now shield-collector
+    3. For exact link counters do the same with snmp-poller.json and shield-snmp-poller
+    4. Host firewall: $PREFIX/deploy/README.md (this installer does not change your firewall)
+
+  Re-run the same install command at any time to upgrade.
 EOF

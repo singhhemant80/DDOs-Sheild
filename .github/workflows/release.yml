@@ -1,0 +1,63 @@
+# Builds the deployable bundle the one-command installer downloads.
+# Push a tag like v0.3.0 to publish a release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.3.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test collector
+        run: cd collector && go vet ./... && go test ./...
+
+      - name: Build dashboard (architecture independent)
+        run: cd frontend && npm ci && npm run build
+
+      - name: Build bundles
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            rm -rf stage && mkdir stage
+            git archive --format=tar HEAD | tar -x -C stage
+            (cd collector && CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
+              go build -trimpath -ldflags "-s -w" -o ../stage/collector/bin/ ./cmd/...)
+            cp -r frontend/dist stage/frontend/dist
+            echo "$TAG" > stage/VERSION
+            name="crapplet-shield-${TAG}-linux-${arch}.tar.gz"
+            tar -C stage -czf "dist/$name" .
+            (cd dist && sha256sum "$name" > "$name.sha256")
+          done
+          ls -la dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" dist/* --clobber

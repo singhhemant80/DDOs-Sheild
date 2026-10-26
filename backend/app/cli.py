@@ -27,10 +27,18 @@ CLI = audit.Actor(None, "cli")
 
 
 def create_admin(args) -> int:
-    pw = args.password or getpass.getpass("Password: ")
-    if not args.password and pw != getpass.getpass("Repeat: "):
-        print("Passwords do not match", file=sys.stderr)
-        return 1
+    if args.if_none:
+        with session_factory()() as db:
+            if db.execute(select(func.count()).select_from(User)).scalar_one() > 0:
+                print("Users already exist; no administrator created.")
+                return 0
+    if args.password_stdin:
+        pw = sys.stdin.readline().rstrip("\n")
+    else:
+        pw = args.password or getpass.getpass("Password: ")
+        if not args.password and pw != getpass.getpass("Repeat: "):
+            print("Passwords do not match", file=sys.stderr)
+            return 1
     problems = security.password_problems(pw, args.username)
     if problems:
         print("Password " + "; ".join(problems), file=sys.stderr)
@@ -150,6 +158,8 @@ def main(argv=None) -> int:
     a.add_argument("--username", required=True)
     a.add_argument("--email")
     a.add_argument("--password", help="non-interactive (avoid: ends up in shell history)")
+    a.add_argument("--password-stdin", action="store_true", help="read the password from standard input")
+    a.add_argument("--if-none", action="store_true", help="do nothing if any user already exists")
     a.set_defaults(fn=create_admin)
     s = sub.add_parser("seed")
     s.add_argument("--file", required=True)
