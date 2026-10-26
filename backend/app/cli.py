@@ -1,6 +1,7 @@
 """Administrative CLI.
 
   python -m app.cli create-admin --username admin
+  python -m app.cli reset-password --username admin [--generate]
   python -m app.cli seed --file ../config/network.example.yaml [--allow-lab-ranges]
   python -m app.cli purge-retention
   python -m app.cli verify-audit
@@ -19,7 +20,7 @@ from . import audit, netvalidate as nv, security
 from .changes import get_setting, record_change
 from .db import session_factory
 from .models import (
-    BgpNeighbor, FlowSummary, LoginAttempt, Notification, ProtectedPrefix, Role, Router, SystemHealth,
+    AuthSession, BgpNeighbor, FlowSummary, LoginAttempt, Notification, ProtectedPrefix, Role, Router, SystemHealth,
     UpstreamProvider, UpstreamRtbhPolicy, User,
 )
 
@@ -52,6 +53,49 @@ def create_admin(args) -> int:
         db.add(u)
         record_change(db, CLI, "user.create", "user", u, note="created via CLI")
     print(f"Administrator {args.username} created.")
+    return 0
+
+
+def reset_password(args) -> int:
+    """Set a user's password from the server (root shell only: it reads the database credentials).
+    Signs the user out everywhere and clears any lockout. MFA stays as it was unless --clear-mfa."""
+    if args.generate:
+        import secrets
+        pw = f"Sh-{secrets.token_hex(9)}-{secrets.token_hex(3)}"
+    elif args.password_stdin:
+        pw = sys.stdin.readline().rstrip("\n")
+    else:
+        pw = getpass.getpass("New password: ")
+        if pw != getpass.getpass("Repeat: "):
+            print("Passwords do not match", file=sys.stderr)
+            return 1
+    problems = security.password_problems(pw, args.username)
+    if problems:
+        print("Password " + "; ".join(problems), file=sys.stderr)
+        return 1
+    with session_factory()() as db, db.begin():
+        u = db.execute(select(User).where(func.lower(User.username) == args.username.lower())).scalar_one_or_none()
+        if u is None:
+            print(f"No user {args.username}", file=sys.stderr)
+            return 1
+        now = datetime.now(UTC)
+        u.password_hash = security.hash_password(pw)
+        u.password_changed_at = now
+        u.failed_login_count = 0
+        u.locked_until = None
+        u.is_active = True
+        if args.clear_mfa:
+            u.mfa_enabled, u.mfa_secret_enc = False, None
+        for sess in db.execute(select(AuthSession).where(AuthSession.user_id == u.id,
+                                                         AuthSession.revoked_at.is_(None))).scalars():
+            sess.revoked_at, sess.revoke_reason = now, "password_reset_cli"
+        audit.record(db, CLI, "user.password_reset", "user", u.id,
+                     after={"username": u.username, "mfa_cleared": bool(args.clear_mfa)})
+    if args.generate:
+        print(f"New password for {args.username}: {pw}")
+    else:
+        print(f"Password for {args.username} changed.")
+    print("All of this user's sessions were signed out.")
     return 0
 
 
@@ -161,6 +205,13 @@ def main(argv=None) -> int:
     a.add_argument("--password-stdin", action="store_true", help="read the password from standard input")
     a.add_argument("--if-none", action="store_true", help="do nothing if any user already exists")
     a.set_defaults(fn=create_admin)
+    r = sub.add_parser("reset-password", help="set a user's password from the server console")
+    r.add_argument("--username", required=True)
+    g = r.add_mutually_exclusive_group()
+    g.add_argument("--generate", action="store_true", help="generate a strong password and print it")
+    g.add_argument("--password-stdin", action="store_true")
+    r.add_argument("--clear-mfa", action="store_true", help="also remove two-factor (lost authenticator)")
+    r.set_defaults(fn=reset_password)
     s = sub.add_parser("seed")
     s.add_argument("--file", required=True)
     s.add_argument("--allow-lab-ranges", action="store_true", help="permit documentation/private ranges (lab only)")

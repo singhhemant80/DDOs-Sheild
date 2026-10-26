@@ -107,6 +107,19 @@ fi
 [ -d "$PREFIX/venv" ] || "$PY" -m venv "$PREFIX/venv"
 "$PREFIX/venv/bin/pip" install -q --upgrade pip
 "$PREFIX/venv/bin/pip" install -q "$PREFIX/backend"
+cat > "$PREFIX/bin/shield-admin" <<ADMIN
+#!/usr/bin/env bash
+# Crapplet Shield server-side admin commands (root only), e.g.
+#   sudo shield-admin reset-password --username admin --generate
+#   sudo shield-admin verify-audit
+set -euo pipefail
+[ "\$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
+cd "$PREFIX/backend"
+set -a; . "$ETC/shield.env"; set +a
+exec runuser -u shield --preserve-environment -- "$PREFIX/venv/bin/python" -m app.cli "\$@"
+ADMIN
+chmod 0750 "$PREFIX/bin/shield-admin"
+ln -sf "$PREFIX/bin/shield-admin" /usr/local/sbin/shield-admin
 
 # ---------------------------------------------------------------- secrets & config
 say "Configuration and secrets"
@@ -223,7 +236,8 @@ out=$(printf '%s\n' "$ADMIN_PW" | run_shield "$PREFIX/venv/bin/python" -m app.cl
   --username "$ADMIN_USER" --if-none --password-stdin)
 note "$out"
 CREATED_ADMIN=0
-case "$out" in *created.*) CREATED_ADMIN=1 ;; esac
+# Exact match: "Users already exist; no administrator created." must not count as created.
+case "$out" in "Administrator $ADMIN_USER created.") CREATED_ADMIN=1 ;; esac
 if [ "$CREATED_ADMIN" = 1 ] && [ "$GENERATED_PW" = 1 ]; then
   (umask 077 && printf 'Crapplet Shield administrator\nusername: %s\npassword: %s\n' "$ADMIN_USER" "$ADMIN_PW" > "$CREDS_FILE")
 fi
@@ -278,6 +292,9 @@ EOF
     echo "  Sign in as:   $ADMIN_USER with the password you provided"
   fi
   echo "  Then turn on two-factor authentication under Settings."
+else
+  echo "  Sign in with your existing account. Forgotten password:"
+  echo "    sudo shield-admin reset-password --username admin --generate"
 fi
 cat <<EOF
 

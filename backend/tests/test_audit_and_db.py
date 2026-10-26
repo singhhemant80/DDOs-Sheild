@@ -118,3 +118,23 @@ def test_health_endpoints(client, engineer):
     cfg.set_main_option("script_location", os.path.join(here, "..", "migrations"))
     assert d["schema_revision"] == ScriptDirectory.from_config(cfg).get_current_head()
     assert d["automation_enabled"] is False
+
+
+def test_cli_reset_password(capsys):
+    from app import cli
+    from app.db import session_factory
+    from app.models import AuditLog, Role, User
+    from sqlalchemy import select
+    from tests.conftest import make_user
+    make_user("opsadmin", Role.ADMIN)
+    with session_factory()() as db, db.begin():
+        u = db.execute(select(User).where(User.username == "opsadmin")).scalar_one()
+        u.failed_login_count, u.mfa_enabled = 7, True
+    assert cli.main(["reset-password", "--username", "opsadmin", "--generate", "--clear-mfa"]) == 0
+    pw = capsys.readouterr().out.split("opsadmin: ")[1].split()[0]
+    with session_factory()() as db:
+        u = db.execute(select(User).where(User.username == "opsadmin")).scalar_one()
+        from app import security
+        assert security.verify_password(u.password_hash, pw) and u.failed_login_count == 0 and not u.mfa_enabled
+        assert db.execute(select(AuditLog).where(AuditLog.action == "user.password_reset")).first()
+    assert cli.main(["reset-password", "--username", "nobody", "--generate"]) == 1
