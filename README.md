@@ -4,11 +4,11 @@ On-premises DDoS detection and mitigation platform for hosting providers, ISPs a
 data centres: flow-based detection, BGP RTBH (upstream and internal), MikroTik
 RouterOS v7 integration, multi-upstream steering, and an operator dashboard.
 
-> **Status: Phase 4 of 10.** Design, foundational backend, live traffic (Go flow collector for
-> NetFlow v9 / IPFIX / sFlow, ClickHouse history, live dashboard) and **attack detection**
-> (classification of floods and reflection attacks, confirmed vs suspected, incidents with
-> evidence). **Nothing in this release changes router configuration or announces a BGP route.**
-> See [docs/roadmap.md](docs/roadmap.md) and [docs/detection.md](docs/detection.md).
+> **Status: Phase 6 of 10.** Live traffic (NetFlow v9 / IPFIX / sFlow collector, ClickHouse
+> history), attack detection, read-only MikroTik RouterOS integration, and the **blackhole (RTBH)
+> workflow in simulation**: preview, approval, execution, verification, withdrawal and restart
+> reconciliation against a simulated BGP speaker. **Nothing in this release changes router
+> configuration or announces a BGP route to anyone.** See [docs/roadmap.md](docs/roadmap.md).
 
 ## Install
 
@@ -29,14 +29,27 @@ curl -fsSL https://raw.githubusercontent.com/singhhemant80/DDOs-Sheild/main/inst
 ```
 
 All options are listed at the top of [install.sh](install.sh). Then point your routers at it:
-[docs/collector.md](docs/collector.md).
+[docs/collector.md](docs/collector.md), and give Shield read-only router access: [docs/mikrotik.md](docs/mikrotik.md).
+
+### Update
+
+Run the install command again. It downloads the newest release, takes a database backup to
+`/var/backups/crapplet-shield` before changing the schema, migrates, and restarts the services.
+Secrets, users and configuration are kept. To install or go back to a specific release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/singhhemant80/DDOs-Sheild/main/install.sh | sudo SHIELD_VERSION=v0.6.0 bash
+```
+
+Going back to an older release does not undo database migrations; restore the pre-upgrade backup
+with `deploy/scripts/restore.sh` if you need the old schema.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
 | `docs/` | Architecture, network topology, threat model, tech stack, roadmap, API notes, collector and detection guides |
-| `backend/` | Python FastAPI management API, attack detector (`app/detector`), models, migrations, tests |
+| `backend/` | Python FastAPI management API, attack detector (`app/detector`), MikroTik poller (`app/mikrotik`), mitigation controller (`app/mitigation`), models, migrations, tests |
 | `collector/` | Go: flow collector, SNMP poller, lab flow generator, ClickHouse schema ([docs/collector.md](docs/collector.md)) |
 | `frontend/` | React + TypeScript dashboard (Vite, Tailwind, uPlot), fonts self-hosted |
 | `config/` | Example network inventory (AS154950 lab values — examples only) |

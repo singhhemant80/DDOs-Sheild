@@ -42,6 +42,8 @@ disabling a user revokes sessions immediately.
 | Live stream | WebSocket `/ws/traffic` (traffic every second + incident events) | read-only |
 | Attacks | `GET /attacks?state=open\|closed\|all&severity=&q=&confirmed_only=`, `/attacks/summary`, `/attacks/{id}`, `/attacks/{id}/series` | read-only |
 | Attack actions | `POST /attacks/{id}/acknowledge`, `/attacks/{id}/false-positive` (`{"note": "..."}`), `/attacks/{id}/notes` | NOC operator |
+| Mitigation (simulation) | `POST /mitigation/preview`, `POST /mitigation/actions` (header `Idempotency-Key` required), `GET /mitigation/actions?state=live\|proposed\|active\|closed\|all&incident_id=`, `GET /mitigation/actions/{id}`, `POST …/{id}/approve`, `…/reject` and `…/withdraw?whole_group=` (`{"reason": "..."}`), `…/extend` (`{"minutes": 60}`), `GET /mitigation/routes`, `GET /mitigation/status` | NOC operator |
+| Mitigation policies | `GET/POST /mitigation/policies`, `PUT/DELETE /mitigation/policies/{id}` | Network engineer |
 | Detection | `GET/POST /detection/profiles`, `PUT/DELETE /detection/profiles/{id}`, `GET /detection/status` | Network engineer (profiles) |
 
 ## Live traffic WebSocket
@@ -98,8 +100,10 @@ Lowering it (e.g. to /24) is an explicit, audited decision.
 | 429 | Rate limited (`Retry-After` header) |
 | 503 | Database unavailable or server-side key missing |
 
+Blocked plans return `409` with `{"detail": {"message": "...", "checks": [{"level": "block", "code": "...", "message": "..."}]}}`.
+Live events: `{"type": "mitigation", "event": "proposed|approved|executing|active|withdrawn|failed|...", "action": {...}}`.
+
 ## Coming in later phases
 
-`/mitigation` (preview / approve / reject / withdraw with `Idempotency-Key`),
-`/rtbh` (active routes, verify), `/policies`, `/notifications`.
+`/notifications` (phase 10); steering, filtering and scrubbing strategies (phase 9).
 The database tables for these already exist (see `backend/app/models.py`).

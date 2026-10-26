@@ -66,13 +66,14 @@ export async function refresh(): Promise<boolean> {
   return refreshing;
 }
 
-export async function api<T = any>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
+export async function api<T = any>(path: string, opts: { method?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<T> {
   const go = () =>
     fetch(`/api/v1${path}`, {
       method: opts.method ?? "GET",
       headers: {
         ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
         ...(access ? { Authorization: `Bearer ${access}` } : {}),
+        ...(opts.headers ?? {}),
       },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });

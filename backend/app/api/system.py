@@ -48,9 +48,24 @@ def health_details(_: Principal = Depends(require(Perm.VIEW)), db: Session = Dep
             "collector": _collector_state(),
             "detector": _detector_state(),
             "mikrotik_adapter": _mikrotik_state(db),
-            "mitigator": "not_installed",         # Phase 6
+            "mitigator": _mitigator_state(),
         },
     }
+
+
+def _mitigator_state() -> str:
+    """up: controller heartbeat fresh and it holds the lock; degraded: last reconcile failed."""
+    try:
+        raw = tm.rds().get("shield:mitigator:status")
+    except Exception:
+        return "down"
+    if not raw:
+        return "down"
+    import json
+    st = json.loads(raw)
+    if not st.get("leader"):
+        return "degraded"
+    return "up" if (st.get("last_reconcile") or {}).get("ok", True) else "degraded"
 
 
 def _mikrotik_state(db: Session) -> str:
@@ -143,6 +158,12 @@ def _validate_setting(key: str, value):
                 ipaddress.ip_address(value)
             except ValueError:
                 raise HTTPException(422, "collector_address must be an IP address") from None
+        if key == "internal_blackhole_community" and value:
+            from .. import netvalidate as nv
+            try:
+                nv.normalise_community(value)
+            except ValueError as e:
+                raise HTTPException(422, f"internal_blackhole_community: {e}") from None
         return
     if isinstance(default, bool):
         if not isinstance(value, bool):

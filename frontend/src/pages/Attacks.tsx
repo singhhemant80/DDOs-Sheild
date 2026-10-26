@@ -9,6 +9,7 @@ import {
   RESOLUTION_WORD, SEVERITY_TONE, STATUS_WORD, useLive, vectorName, type Incident,
 } from "../lib/live";
 import { LiveChart } from "../components/LiveChart";
+import { IncidentMitigation } from "./Mitigation";
 import { Num, ProvTag } from "../components/Provenance";
 import { Badge, Button, Dialog, ErrorLine, Field, Input, Lamp, Notice, PageHeader, Section, Select, Table } from "../components/ui";
 
@@ -177,6 +178,8 @@ const EVENT_WORD: Record<string, string> = {
   vectors_changed: "Attack type changed", resolved: "Closed", acknowledged: "Acknowledged",
   false_positive: "Marked false positive", note: "Note", data_gap: "Traffic data stopped",
   data_resumed: "Traffic data resumed", detector_restarted: "Detector restarted",
+  mitigation_active: "Blackhole active", mitigation_withdrawn: "Blackhole withdrawn", mitigation_failed: "Blackhole failed",
+  mitigation_rolled_back: "Blackhole rolled back", mitigation_blocked: "Policy could not act",
 };
 
 const FACTORS: [string, string, string][] = [
@@ -324,7 +327,7 @@ export function AttackDetail() {
                 <Badge tone={inc.eligibility.steering_allowed ? "ok" : "neutral"}>Steering {inc.eligibility.steering_allowed ? "allowed" : "not allowed"}</Badge>
               </div>
               {inc.eligibility.reasons.length > 0 && <ul className="list-disc pl-5 text-ink-2">{inc.eligibility.reasons.map((r) => <li key={r}>{r}</li>)}</ul>}
-              <p className="text-ink-3">Proposing and approving mitigations arrives in phase 6. Only confirmed attacks will be eligible.</p>
+              <IncidentMitigation incidentId={inc.id} target={inc.target} eligible={inc.eligibility.rtbh_allowed} open={!!open} />
             </div>
           ) : <p className="text-sm text-ink-2">The target is not inside a protected prefix, so no mitigation is possible.</p>}
         </Section>
@@ -355,6 +358,7 @@ function TimelineDetail({ kind, d }: { kind: string; d: Record<string, any> }) {
   if (kind === "vectors_changed") return <p className="mt-0.5 text-ink-2">Now {(d.vectors ?? []).map(vectorName).join(", ")}</p>;
   if (kind === "resolved") return <p className="mt-0.5 text-ink-2">{RESOLUTION_WORD[d.resolution] ?? d.resolution}</p>;
   if (kind === "data_gap" || kind === "detector_restarted") return <p className="mt-0.5 text-ink-2">{d.note}</p>;
+  if (kind.startsWith("mitigation_")) return <p className="mt-0.5 text-ink-2">{d.route ?? (d.reasons ?? []).join(" ")}{d.simulation ? " (simulation)" : ""}</p>;
   return null;
 }
 

@@ -717,9 +717,17 @@ class MitigationAction(TimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
+    # Phase 6
+    group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))   # one request, several upstreams
+    hold_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # never auto-withdrawn before
+    extensions: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0", default=0)
+    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0", default=0)
+    withdrawn_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    withdraw_reason: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
         Index("ix_actions_state", "state"),
+        Index("ix_actions_group", "group_id"),
         # At most one live action per (strategy, target, upstream).
         Index(
             "uq_actions_live_target",
@@ -767,6 +775,8 @@ class RtbhRoute(TimestampMixin, Base):
     withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     withdraw_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_verify_result: Mapped[dict | None] = mapped_column(JSONB)
+    # Phase 6: which speaker carried it. "simulated" routes never left Shield.
+    speaker: Mapped[str] = mapped_column(String(16), nullable=False, server_default="simulated", default="simulated")
 
     __table_args__ = (
         Index("ix_rtbh_status", "status"),
@@ -893,4 +903,9 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "retention_notifications_days": (90, "Retention for notifications rows."),
     "false_positive_suppress_minutes": (30, "After an incident is marked a false positive, how long the same target is not re-reported."),
     "collector_address": ("", "Address routers should send flow exports to (used to check router configuration)."),
+    "internal_blackhole_community": ("", "Community Shield attaches to internal blackhole routes sent to your own edge routers (e.g. 65535:666). Empty disables internal RTBH."),
+    "four_eyes_approval": (False, "A mitigation must be approved by someone other than the person who proposed it."),
+    "proposal_ttl_minutes": (15, "Proposals not approved within this time expire; the situation has probably changed."),
+    "rtbh_flap_cooldown_seconds": (900, "After a blackhole is withdrawn, re-blackholing the same address within this time needs a human (no automatic re-announce)."),
+    "rtbh_default_duration_minutes": (60, "How long a manual blackhole lasts before it is reviewed for withdrawal (extended while the attack continues)."),
 }

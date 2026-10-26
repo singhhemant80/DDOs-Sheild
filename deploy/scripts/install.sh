@@ -145,6 +145,15 @@ run_shield() {  # run a command as the shield user with shield.env loaded
   (cd "$PREFIX/backend" && set -a && . "$ETC/shield.env" && set +a && \
     runuser -u shield --preserve-environment -- "$@")
 }
+if as postgres psql -d shield -tAc "select 1 from information_schema.tables where table_name='alembic_version'" | grep -q 1; then
+  # Upgrade: keep a database backup from just before the schema changes.
+  install -d -o postgres -g postgres -m 0700 /var/backups/crapplet-shield
+  if as postgres env BACKUP_DIR=/var/backups/crapplet-shield bash "$PREFIX/deploy/scripts/backup.sh" >/dev/null; then
+    note "pre-upgrade database backup written to /var/backups/crapplet-shield"
+  else
+    die "pre-upgrade backup failed; nothing was changed in the database"
+  fi
+fi
 run_shield "$PREFIX/venv/bin/alembic" upgrade head
 note "schema up to date"
 
@@ -178,8 +187,8 @@ sysctl -q --system >/dev/null 2>&1 || true
 install -m 0644 "$PREFIX"/deploy/systemd/*.service "$PREFIX"/deploy/systemd/*.timer /etc/systemd/system/
 install -d -o postgres -g postgres -m 0700 /var/backups/crapplet-shield
 systemctl daemon-reload
-systemctl enable shield-api.service shield-detector.service shield-mikrotik.service shield-maintenance.timer shield-backup.timer >/dev/null 2>&1
-systemctl restart shield-api.service shield-detector.service shield-mikrotik.service
+systemctl enable shield-api.service shield-detector.service shield-mikrotik.service shield-mitigator.service shield-maintenance.timer shield-backup.timer >/dev/null 2>&1
+systemctl restart shield-api.service shield-detector.service shield-mikrotik.service shield-mitigator.service
 systemctl start shield-maintenance.timer shield-backup.timer
 for f in collector snmp-poller; do
   if [ -f "$ETC/$f.json" ]; then

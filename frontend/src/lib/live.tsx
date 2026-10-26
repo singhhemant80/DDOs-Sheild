@@ -28,6 +28,7 @@ type Ctx = {
   incidents: Incident[];         // open incidents, kept current by the event stream
   lastIncidentEvent: IncidentEvent | null;
   reloadIncidents: () => void;
+  mitigationVersion: number;     // bumps on every mitigation event; pages reload on change
 };
 
 const LiveCtx = createContext<Ctx | null>(null);
@@ -42,6 +43,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const [reason, setReason] = useState("");
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [lastIncidentEvent, setLast] = useState<IncidentEvent | null>(null);
+  const [mitigationVersion, setMitigationVersion] = useState(0);
   const histRef = useRef<HistoryPoint[]>([]);
   const reloadTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -101,6 +103,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
         if (m.type === "ready") { retry = 1000; return; }
         if (m.type === "status") { setState("no-data"); setReason(m.reason ?? ""); return; }
         if (m.type === "incident") { onIncident(m); return; }
+        if (m.type === "mitigation") { setMitigationVersion((v) => v + 1); return; }
         if (m.type !== "traffic") return;
         const s: Snapshot = m.data;
         setState("live");
@@ -129,7 +132,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <LiveCtx.Provider value={{ latest, history, state, reason, incidents, lastIncidentEvent, reloadIncidents }}>
+    <LiveCtx.Provider value={{ latest, history, state, reason, incidents, lastIncidentEvent, reloadIncidents, mitigationVersion }}>
       {children}
     </LiveCtx.Provider>
   );

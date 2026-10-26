@@ -23,8 +23,8 @@ export const NAV: { group: string; items: Item[] }[] = [
     { to: "/history", label: "Attack history", icon: <History size={17} /> },
   ] },
   { group: "Mitigate", items: [
-    { to: "/mitigation", label: "Mitigation center", icon: <Swords size={17} />, phase: 6 },
-    { to: "/rtbh", label: "Blackhole routes", icon: <ShieldBan size={17} />, phase: 6 },
+    { to: "/mitigation", label: "Mitigation center", icon: <Swords size={17} /> },
+    { to: "/rtbh", label: "Blackhole routes", icon: <ShieldBan size={17} /> },
     { to: "/alerts", label: "Alerts", icon: <Bell size={17} />, phase: 10 },
   ] },
   { group: "Network", items: [

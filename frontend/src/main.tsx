@@ -12,6 +12,7 @@ import { AuditLog, HealthPage, SettingsPage, Upcoming, Users } from "./pages/Adm
 import { ActiveAttacks, AttackDetail, AttackHistory } from "./pages/Attacks";
 import { LiveProvider } from "./lib/live";
 import { RouterDetail, Topology } from "./pages/Routers";
+import { ActionDetail, BlackholeRoutes, MitigationCenter, Policies } from "./pages/Mitigation";
 
 function App() {
   const { me, ready } = useAuth();
@@ -26,14 +27,10 @@ function App() {
         <Route path="attacks" element={<ActiveAttacks />} />
         <Route path="attacks/:id" element={<AttackDetail />} />
         <Route path="history" element={<AttackHistory />} />
-        <Route path="mitigation" element={<Upcoming title="Mitigation center" phase={6}>
-          <p>Proposed actions with a preview of exactly what changes and who is affected, approve and reject controls, and live verification of each action.</p>
-          <p className="text-ink-2">Runs in simulation first; real announcements start in phase 8.</p>
-        </Upcoming>} />
-        <Route path="rtbh" element={<Upcoming title="Blackhole routes" phase={6}>
-          <p>Announced blackhole routes per upstream, when each was verified, and withdrawal with hold-time and flap protection.</p>
-          <p className="text-ink-2">Upstream blackhole policies can already be recorded and verified under Routers & upstreams.</p>
-        </Upcoming>} />
+        <Route path="mitigation" element={<MitigationCenter />} />
+        <Route path="mitigation/policies" element={<Policies />} />
+        <Route path="mitigation/:id" element={<ActionDetail />} />
+        <Route path="rtbh" element={<BlackholeRoutes />} />
         <Route path="alerts" element={<Upcoming title="Alerts" phase={10}>
           <p>Email, Telegram and webhook notifications for attacks, mitigation changes, BGP session loss and saturated links, with de-duplication and escalation.</p>
         </Upcoming>} />
