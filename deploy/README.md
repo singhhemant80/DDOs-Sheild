@@ -27,7 +27,7 @@ with Internet access, copy `/tmp/shield` across, and run `sudo /tmp/shield/deplo
 The server still needs its OS package repositories (or a local mirror) for PostgreSQL, Redis,
 ClickHouse and nginx.
 
-**Releases:** pushing a tag `vX.Y.Z` makes GitHub Actions build and publish
+**Releases:** change the `VERSION` file on `main` (e.g. `v0.4.0`) and push; GitHub Actions creates the tag and publishes
 `crapplet-shield-vX.Y.Z-linux-{amd64,arm64}.tar.gz` with `.sha256` files.
 
 | Unit | Purpose |

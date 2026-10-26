@@ -1,15 +1,16 @@
-# Builds the deployable bundle the one-command installer downloads.
-# Push a tag like v0.3.0 to publish a release.
+# Builds the deployable bundles the one-command installer downloads.
+#
+# To release: change the VERSION file on main (e.g. v0.4.0) and push. This workflow then creates
+# the tag and the GitHub release, and uploads crapplet-shield-<tag>-linux-{amd64,arm64}.tar.gz
+# plus .sha256 files. Pushing a v* tag directly works too.
 name: release
 
 on:
   push:
+    branches: [main]
+    paths: [VERSION]
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Existing tag to (re)build, e.g. v0.3.0"
-        required: true
 
 permissions:
   contents: write
@@ -17,20 +18,21 @@ permissions:
 jobs:
   bundle:
     runs-on: ubuntu-24.04
-    env:
-      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
+
+      - name: Determine version
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tag="${GITHUB_REF#refs/tags/}"; else tag="$(tr -d '[:space:]' < VERSION)"; fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]] || { echo "bad version '$tag'"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
+        with: { go-version: "1.24" }
 
       - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
+        with: { node-version: "22" }
 
       - name: Test collector
         run: cd collector && go vet ./... && go test ./...
@@ -39,6 +41,7 @@ jobs:
         run: cd frontend && npm ci && npm run build
 
       - name: Build bundles
+        env: { TAG: "${{ steps.v.outputs.tag }}" }
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -58,6 +61,8 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
           gh release upload "$TAG" dist/* --clobber
