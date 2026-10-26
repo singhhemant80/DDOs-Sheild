@@ -178,8 +178,8 @@ sysctl -q --system >/dev/null 2>&1 || true
 install -m 0644 "$PREFIX"/deploy/systemd/*.service "$PREFIX"/deploy/systemd/*.timer /etc/systemd/system/
 install -d -o postgres -g postgres -m 0700 /var/backups/crapplet-shield
 systemctl daemon-reload
-systemctl enable shield-api.service shield-detector.service shield-maintenance.timer shield-backup.timer >/dev/null 2>&1
-systemctl restart shield-api.service shield-detector.service
+systemctl enable shield-api.service shield-detector.service shield-mikrotik.service shield-maintenance.timer shield-backup.timer >/dev/null 2>&1
+systemctl restart shield-api.service shield-detector.service shield-mikrotik.service
 systemctl start shield-maintenance.timer shield-backup.timer
 for f in collector snmp-poller; do
   if [ -f "$ETC/$f.json" ]; then

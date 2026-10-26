@@ -32,7 +32,7 @@ export const NAV: { group: string; items: Item[] }[] = [
     { to: "/customers", label: "Customer IPs", icon: <Cable size={17} /> },
     { to: "/routers", label: "Routers & upstreams", icon: <RouterIcon size={17} /> },
     { to: "/bgp", label: "BGP sessions", icon: <Waypoints size={17} /> },
-    { to: "/topology", label: "Topology", icon: <Network size={17} />, phase: 5 },
+    { to: "/topology", label: "Topology", icon: <Network size={17} /> },
   ] },
   { group: "Admin", items: [
     { to: "/users", label: "Users & roles", icon: <Users size={17} /> },
@@ -98,6 +98,7 @@ function StatusStrip() {
       <Lamp tone={collTone as any} label={
         <>Flow collector {c.collector === "up" ? `receiving (${ago(lastSeen)})` : c.collector === "degraded" ? "running, no exporters sending" : "not running"}</>
       } />
+      <RouterLamp />
       <Lamp tone={c.redis === "up" ? "ok" : "attack"} label={c.redis === "up" ? "Live feed" : "Live feed down"} />
       <Lamp tone={data?.automation_enabled ? "signal" : "neutral"}
         label={data?.automation_enabled ? "Automatic mitigation on" : "Automatic mitigation off"} />
@@ -125,6 +126,21 @@ function StatusStrip() {
         {err && <Notice tone="attack">{err}</Notice>}
       </Dialog>
     </div>
+  );
+}
+
+function RouterLamp() {
+  const { data } = useApi<{ id: number; enabled: boolean; has_api_password: boolean; status: string }[]>("/routers", 15_000);
+  const polled = (data ?? []).filter((r) => r.enabled && r.has_api_password);
+  if (!polled.length) return null;
+  const down = polled.filter((r) => r.status === "down").length;
+  const degraded = polled.filter((r) => r.status === "degraded").length;
+  return (
+    <NavLink to="/routers" className="hover:underline">
+      <Lamp tone={down ? "attack" : degraded ? "warn" : "ok"}
+        label={down ? `${down} router${down > 1 ? "s" : ""} unreachable` : degraded ? `${degraded} router${degraded > 1 ? "s" : ""} need attention`
+          : `${polled.length} router${polled.length > 1 ? "s" : ""} up`} />
+    </NavLink>
   );
 }
 

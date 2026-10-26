@@ -265,11 +265,57 @@ class Router(TimestampMixin, Base):
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
+    # Phase 5: SHA-256 of the router's API-SSL certificate ("AB:CD:..."). When set, the connection is
+    # accepted only if the presented certificate matches, whatever CA signed it.
+    tls_fingerprint: Mapped[str | None] = mapped_column(String(95))
 
     __table_args__ = (
         CheckConstraint("api_port BETWEEN 1 AND 65535", name="ck_routers_port"),
         CheckConstraint("use_tls OR access_mode = 'read_only'", name="ck_routers_write_requires_tls"),
+        CheckConstraint("tls_fingerprint IS NULL OR tls_fingerprint ~ '^([0-9A-F]{2}:){31}[0-9A-F]{2}$'",
+                        name="ck_routers_fingerprint"),
     )
+
+
+class RouterState(Base):
+    """Latest read-only snapshot of a router, replaced on every full poll (Phase 5)."""
+
+    __tablename__ = "router_state"
+
+    router_id: Mapped[int] = mapped_column(ForeignKey("routers.id", ondelete="CASCADE"), primary_key=True)
+    polled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    identity: Mapped[str | None] = mapped_column(String(128))
+    version: Mapped[str | None] = mapped_column(String(64))
+    board: Mapped[str | None] = mapped_column(String(64))
+    uptime_seconds: Mapped[int | None] = mapped_column(BigInteger)
+    cpu_load: Mapped[int | None] = mapped_column(SmallInteger)
+    resources: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    interfaces: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    addresses: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    bgp: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    routes: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    traffic_flow: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    permissions: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    checks: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+
+class RouterEvent(Base):
+    """Things that happened on a router: unreachable/recovered, BGP up/down, reboots, version changes."""
+
+    __tablename__ = "router_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    router_id: Mapped[int] = mapped_column(ForeignKey("routers.id", ondelete="CASCADE"), nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[Severity] = mapped_column(_enum(Severity, "severity"), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    __table_args__ = (Index("ix_router_events_router_at", "router_id", "at"), Index("ix_router_events_at", "at"))
 
 
 class UpstreamProvider(TimestampMixin, Base):
@@ -846,4 +892,5 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "retention_system_health_days": (30, "Retention for system_health rows."),
     "retention_notifications_days": (90, "Retention for notifications rows."),
     "false_positive_suppress_minutes": (30, "After an incident is marked a false positive, how long the same target is not re-reported."),
+    "collector_address": ("", "Address routers should send flow exports to (used to check router configuration)."),
 }

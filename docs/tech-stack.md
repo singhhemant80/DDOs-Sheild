@@ -8,7 +8,7 @@
 | Flow analytics | ClickHouse | Columnar, very high insert rate, TTL-based retention and materialised rollups | TimescaleDB (simpler ops, lower ingest ceiling) |
 | Live state | Redis 7 | Sub-second counters, pub/sub to WebSocket workers; loss-tolerant | NATS |
 | Flow collector | Go | Line-rate UDP decode, low GC pressure, single static binary; libraries for NetFlow v9/IPFIX/sFlow | Rust (equally good; Go chosen for team familiarity), goflow2 as base |
-| Router integration | RouterOS API-SSL via `librouteros` | Structured API, no screen-scraping; SSH fallback only for export/backup | Pure SSH |
+| Router integration | RouterOS API-SSL, own ~300-line client (`backend/app/mikrotik/api.py`) | Structured API, no screen-scraping. Own client so the read-only guard and certificate pinning sit in the one place every command passes through, with no dependency to audit | `librouteros`, pure SSH |
 | BGP speaker | FRRouting `bgpd` | Production-grade, prefix-lists/route-maps, scriptable via `vtysh`, packaged on Ubuntu/Alma | ExaBGP (simpler API, fewer guard-rails), GoBGP |
 | Password hashing | Argon2id (`argon2-cffi`) | OWASP-recommended, memory-hard | bcrypt |
 | Tokens | Short-lived JWT access + opaque rotating refresh token (hashed in DB) | Stateless checks on hot path, revocable sessions | Server sessions only |

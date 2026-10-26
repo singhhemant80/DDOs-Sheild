@@ -47,10 +47,26 @@ def health_details(_: Principal = Depends(require(Perm.VIEW)), db: Session = Dep
             "clickhouse": "up" if tm.clickhouse_ok() else "down",
             "collector": _collector_state(),
             "detector": _detector_state(),
-            "mikrotik_adapter": "not_installed",  # Phase 5
+            "mikrotik_adapter": _mikrotik_state(db),
             "mitigator": "not_installed",         # Phase 6
         },
     }
+
+
+def _mikrotik_state(db: Session) -> str:
+    """up: heartbeat fresh and no router down; degraded: some router down; down: no heartbeat
+    while routers with credentials exist; idle: nothing to poll."""
+    from ..models import DeviceStatus, Router
+    polled = db.execute(select(Router.status).where(Router.enabled, Router.api_password_enc.is_not(None))).scalars().all()
+    try:
+        raw = tm.rds().get("shield:mikrotik:status")
+    except Exception:
+        raw = None
+    if not polled:
+        return "idle"
+    if not raw:
+        return "down"
+    return "degraded" if any(s == DeviceStatus.DOWN for s in polled) else "up"
 
 
 def _detector_state() -> str:
@@ -118,6 +134,16 @@ _GUARDED = {"automation_enabled", "rtbh_emergency_disable"}
 
 def _validate_setting(key: str, value):
     default = DEFAULT_SETTINGS[key][0]
+    if isinstance(default, str):
+        if not isinstance(value, str) or len(value) > 255:
+            raise HTTPException(422, f"{key} must be text")
+        if key == "collector_address" and value:
+            import ipaddress
+            try:
+                ipaddress.ip_address(value)
+            except ValueError:
+                raise HTTPException(422, "collector_address must be an IP address") from None
+        return
     if isinstance(default, bool):
         if not isinstance(value, bool):
             raise HTTPException(422, f"{key} must be a boolean")

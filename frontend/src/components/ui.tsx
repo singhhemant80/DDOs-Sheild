@@ -65,10 +65,10 @@ export function Input(p: InputHTMLAttributes<HTMLInputElement>) {
 }
 
 export function Select({ value, onChange, options, ...rest }:
-  { value: string; onChange: (v: string) => void; options: [string, string][]; "aria-label"?: string }) {
+  { value: string; onChange: (v: string) => void; options: [string, string][]; "aria-label"?: string; disabled?: boolean }) {
   return (
     <select {...rest} value={value} onChange={(e) => onChange(e.target.value)}
-      className="h-9 rounded-[3px] border border-rule bg-panel px-2 text-[15px]">
+      className="h-9 rounded-[3px] border border-rule bg-panel px-2 text-[15px] disabled:opacity-60">
       {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
     </select>
   );

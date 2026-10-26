@@ -296,14 +296,14 @@ const COMPONENTS: [string, string, string][] = [
   ["api", "Management API", ""], ["database", "PostgreSQL", "Configuration, users, audit"],
   ["redis", "Redis", "Live feed"], ["clickhouse", "ClickHouse", "Traffic history"],
   ["collector", "Flow collector", "NetFlow, IPFIX, sFlow"], ["detector", "Detection engine", "Attack detection and incidents"],
-  ["mikrotik_adapter", "MikroTik adapter", "Phase 5"], ["mitigator", "Mitigation engine", "Phase 6"],
+  ["mikrotik_adapter", "MikroTik poller", "Read-only router status"], ["mitigator", "Mitigation engine", "Phase 6"],
 ];
 
 export function HealthPage() {
   const h = useApi<Health>("/health/details", 10_000);
   const c = useApi<Collector>("/collector/status", 5_000);
-  const tone = (s: string) => (s === "up" ? "ok" : s === "degraded" ? "warn" : s === "not_installed" ? "neutral" : "attack") as any;
-  const word = (s: string) => ({ up: "Running", down: "Down", degraded: "Degraded", not_installed: "Not part of this release" }[s] ?? s);
+  const tone = (s: string) => (s === "up" ? "ok" : s === "degraded" ? "warn" : s === "not_installed" || s === "idle" ? "neutral" : "attack") as any;
+  const word = (s: string) => ({ up: "Running", down: "Down", degraded: "Degraded", not_installed: "Not part of this release", idle: "Nothing to do" }[s] ?? s);
   const col = c.data;
   return (
     <div className="space-y-5">

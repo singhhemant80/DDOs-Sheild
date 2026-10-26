@@ -29,9 +29,11 @@ disabling a user revokes sessions immediately.
 | Auth | `login`, `refresh`, `logout`, `me`, `password`, `mfa/{setup,enable,disable}`, `sessions` | self |
 | Users | `GET/POST /users`, `PATCH /users/{id}` | Admin |
 | Prefixes | `GET/POST /prefixes`, `GET/PATCH/DELETE /prefixes/{id}`, `GET /prefixes/eligibility?target=` | Network Engineer |
-| Routers | `GET/POST /routers`, `GET/PATCH/DELETE /routers/{id}` | Network Engineer |
+| Routers | `GET/POST /routers`, `GET/PATCH/DELETE /routers/{id}` (`tls_fingerprint` pins the api-ssl certificate; `""` clears it) | Network Engineer |
+| Router status | `GET /routers/states`, `/routers/events?limit=`, `/routers/{id}/state`, `/routers/{id}/events` | read-only |
+| Router checks | `POST /routers/{id}/test` (one read-only connection with the stored credentials; returns checks, account permissions, or the presented certificate fingerprint), `POST /routers/{id}/certificate` (reads the certificate without sending credentials) | Network Engineer |
 | Upstreams | CRUD + `PUT /upstreams/{id}/rtbh-policy`, `POST …/verify`, `…/enable`, `…/disable` | Engineer (disable: NOC) |
-| BGP | `GET/POST /bgp/neighbors`, `DELETE /bgp/neighbors/{id}` | Network Engineer |
+| BGP | `GET/POST /bgp/neighbors`, `DELETE /bgp/neighbors/{id}`, `GET /bgp/sessions` (live from routers, matched to inventory) | Network Engineer |
 | Customers | `GET/POST /customers/ips`, `DELETE /customers/ips/{id}` | Network Engineer |
 | Audit | `GET /audit`, `GET /audit/verify` | — (read) |
 | Settings | `GET /settings`, `PUT /settings/{key}` | Admin |
@@ -50,6 +52,7 @@ ws.onopen = () => ws.send(JSON.stringify({ token: accessToken }));   // within 5
 ws.onmessage = (e) => {
   const m = JSON.parse(e.data);
   // {"type":"ready"} | {"type":"traffic","data":Snapshot} | {"type":"status","available":false,"reason":"..."}
+  // | {"type":"incident",...} | {"type":"router_event","router":"edge-r1","kind":"bgp_down",...}
 };
 ```
 

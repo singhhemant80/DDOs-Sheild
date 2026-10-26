@@ -139,7 +139,17 @@ def interfaces() -> list[dict]:
         if r["age_seconds"] > s.iface_stale_seconds:
             r["provenance"] = "unavailable"
         out.append(r)
-    out.sort(key=lambda r: (r.get("agent", ""), r.get("if_index", 0)))
+    # The same port can be reported by several sources (RouterOS API, SNMP, sFlow counters).
+    # Keep one row per (agent, name): fresh before stale, then the most direct source.
+    rank = {"routeros": 0, "snmp": 1, "sflow": 2}
+    best: dict[tuple, dict] = {}
+    for r in out:
+        key = (r.get("agent"), r.get("if_name") or f"#{r.get('if_index')}")
+        score = (r["provenance"] == "unavailable", rank.get(r.get("source"), 9))
+        if key not in best or score < best[key][0]:
+            best[key] = (score, r)
+    out = [r for _, r in best.values()]
+    out.sort(key=lambda r: (r.get("agent", ""), r.get("if_name") or "", r.get("if_index", 0)))
     return out
 
 

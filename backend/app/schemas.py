@@ -190,6 +190,12 @@ class RouterCreate(BaseModel):
     access_mode: AccessMode = AccessMode.READ_ONLY
     enabled: bool = True
     notes: str | None = Field(None, max_length=2000)
+    tls_fingerprint: str | None = Field(None, max_length=200)
+
+    @field_validator("tls_fingerprint")
+    @classmethod
+    def _fp(cls, v):
+        return _fingerprint(v) or None
 
     @field_validator("mgmt_address")
     @classmethod
@@ -204,6 +210,14 @@ class RouterCreate(BaseModel):
         return self
 
 
+def _fingerprint(v: str | None) -> str | None:
+    """Accept 'AB:CD:..', 'abcd..' or '' (clear); store as upper-case colon pairs."""
+    if v is None or not v.strip():
+        return None if v is None else ""
+    from .mikrotik.api import colon_fingerprint
+    return colon_fingerprint(v)
+
+
 class RouterUpdate(BaseModel):
     role: str | None = Field(None, pattern=r"^(primary|secondary|edge|lab)$")
     api_port: int | None = Field(None, ge=1, le=65535)
@@ -215,6 +229,9 @@ class RouterUpdate(BaseModel):
     dry_run: bool | None = None
     enabled: bool | None = None
     notes: str | None = Field(None, max_length=2000)
+    tls_fingerprint: str | None = Field(None, max_length=200)
+
+    _fp = field_validator("tls_fingerprint")(lambda cls, v: _fingerprint(v))
 
 
 class RouterOut(_Out):
@@ -236,6 +253,7 @@ class RouterOut(_Out):
     status: str
     last_seen_at: datetime | None
     notes: str | None
+    tls_fingerprint: str | None = None
 
     _a = field_validator("mgmt_address", mode="before")(_str)
 

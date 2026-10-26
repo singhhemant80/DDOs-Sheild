@@ -36,6 +36,7 @@ ClickHouse and nginx.
 | `shield-maintenance.timer` | Nightly retention purge + audit-chain verification (unit fails if the chain is broken) |
 | `shield-backup.timer` | Nightly `pg_dump` to `/var/backups/crapplet-shield`, 14-day retention, optional GPG |
 | `shield-detector.service` | Attack detection: reads the collector's live stream, writes incidents (safe to restart; open incidents resume) |
+| `shield-mikrotik.service` | Read-only RouterOS poller: interfaces, BGP, flow-export checks every 10/30/60 s |
 | `shield-collector.service` | Flow collector (enabled once `/etc/crapplet-shield/collector.json` exists) |
 | `shield-snmp-poller.service` | Interface counters (enabled once `snmp-poller.json` exists) |
 

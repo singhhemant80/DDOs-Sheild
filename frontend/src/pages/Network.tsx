@@ -3,8 +3,9 @@ import { Plus } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useApi } from "../lib/hooks";
-import { ago, dateTime } from "../lib/format";
+import { dateTime } from "../lib/format";
 import { Badge, Button, Check, Dialog, ErrorLine, Field, Input, Lamp, Notice, PageHeader, Section, Select, Table } from "../components/ui";
+import { duration, EventTable, RouterList, type Peer, type RouterEvent } from "./Routers";
 
 // ================================================================ Protected prefixes
 type Prefix = {
@@ -213,19 +214,9 @@ export function Routers() {
   return (
     <div className="space-y-5">
       <PageHeader title="Routers & upstreams"
-        description="Edge routers and transit providers. Shield starts read-only: router connections arrive in phase 5, and no router is changed until phase 8." />
-      <ErrorLine error={routers.error ?? ups.error} />
-      <Section title="Edge routers" flush>
-        <Table rows={routers.data ?? []} rowKey={(r) => String(r.id)} empty="No routers configured."
-          cols={[
-            { key: "n", header: "Router", render: (r) => <><div className="font-medium">{r.name}</div><div className="text-xs text-ink-3">{r.model.toUpperCase()}, {r.role}</div></> },
-            { key: "a", header: "Management", render: (r) => <>{r.mgmt_address}:{r.api_port} {r.use_tls ? <Badge tone="ok">TLS</Badge> : <Badge tone="warn">No TLS</Badge>}</> },
-            { key: "m", header: "Access", render: (r) => r.access_mode === "read_only" ? <Badge>Read-only</Badge> : <Badge tone="warn">Read-write{r.dry_run ? ", dry run" : ""}</Badge> },
-            { key: "s", header: "Status", render: (r) => r.status === "unknown" ? <span className="text-ink-3">Not polled yet</span>
-                : <Lamp tone={r.status === "up" ? "ok" : r.status === "degraded" ? "warn" : "attack"} label={`${r.status}, ${ago(r.last_seen_at ? Date.parse(r.last_seen_at) / 1000 : null)}`} /> },
-            { key: "v", header: "RouterOS", render: (r) => r.routeros_version ?? <span className="text-ink-3">–</span> },
-          ]} />
-      </Section>
+        description="Edge routers and transit providers. Shield only reads from routers: nothing on a router is changed until phase 8, and then only with approval." />
+      <ErrorLine error={ups.error} />
+      <RouterList />
       <Section title="Upstream providers" flush>
         <Table rows={ups.data ?? []} rowKey={(r) => String(r.id)} empty="No upstreams configured."
           onRow={can("config_network") ? setPolicyFor : undefined}
@@ -290,27 +281,47 @@ const PURPOSE: Record<string, string> = {
   rtbh_upstream: "Dedicated upstream blackhole session", steering: "Steering",
 };
 
+type Session = Peer & { router_id: number; router: string | null; polled_at?: string; stale: boolean; in_inventory: boolean;
+  neighbor_id: number | null; purpose: string | null; missing_on_router?: boolean };
+
 export function Bgp() {
   const n = useApi<Neighbor[]>("/bgp/neighbors");
+  const live = useApi<Session[]>("/bgp/sessions", 15_000);
   const r = useApi<Router[]>("/routers");
+  const events = useApi<RouterEvent[]>("/routers/events?limit=200", 30_000);
   const rname = (id: number | null) => id == null ? "Shield (FRR)" : r.data?.find((x) => x.id === id)?.name ?? "–";
+  const shieldSessions = (n.data ?? []).filter((x) => x.router_id == null);
+  const bgpEvents = (events.data ?? []).filter((e) => e.kind.startsWith("bgp_")).slice(0, 30);
   return (
     <div className="space-y-5">
       <PageHeader title="BGP sessions"
-        description="Known sessions. Live state is read from the routers from phase 5; Shield's own blackhole sessions come online in phase 7." />
-      <ErrorLine error={n.error} />
-      <Section flush>
-        <Table rows={n.data ?? []} rowKey={(x) => String(x.id)} empty="No BGP sessions recorded."
+        description="Sessions as the routers report them, every 30 seconds, matched against the sessions recorded in Shield." />
+      <ErrorLine error={live.error ?? n.error} />
+      <Section title="On the routers" flush>
+        <Table rows={live.data ?? []} rowKey={(x) => `${x.router_id}|${x.remote_address}`}
+          empty="No sessions read yet. Add routers with API credentials under Routers & upstreams."
           cols={[
-            { key: "n", header: "Session", render: (x) => <><div className="font-medium">{x.name}</div><div className="text-xs text-ink-3">{PURPOSE[x.purpose] ?? x.purpose}</div></> },
-            { key: "e", header: "Between", render: (x) => <>{rname(x.router_id)} and {x.neighbor_address}</> },
-            { key: "as", header: "AS numbers", render: (x) => `AS${x.local_asn} to AS${x.remote_asn}` },
-            { key: "m", header: "Managed by Shield", render: (x) => x.managed_by_shield ? <Badge tone="signal">Yes, max {x.max_prefix_out} routes</Badge> : <span className="text-ink-3">No</span> },
-            { key: "s", header: "State", render: (x) => x.last_state
-                ? <Lamp tone={x.last_state === "established" ? "ok" : "attack"} label={x.last_state} />
-                : <span className="hatch inline-block px-2 text-ink-3">Not polled yet</span> },
+            { key: "n", header: "Session", render: (x) => <><div className="font-medium">{x.name}</div>
+              <div className="text-xs text-ink-3">{x.purpose ? PURPOSE[x.purpose] ?? x.purpose : x.role ?? ""}</div></> },
+            { key: "e", header: "Between", render: (x) => <>{x.router ?? rname(x.router_id)} and {x.remote_address}<div className="text-xs text-ink-3">AS{x.remote_as ?? "?"}</div></> },
+            { key: "s", header: "State", render: (x) => x.missing_on_router ? <Badge tone="warn">Not configured on the router</Badge>
+                : x.disabled ? <span className="text-ink-3">Disabled</span>
+                : <Lamp tone={x.established ? "ok" : "attack"} label={x.established ? `Established ${duration(x.uptime_seconds)}` : x.state} /> },
+            { key: "p", header: "Prefixes received", align: "right", render: (x) => x.prefixes_received != null ? x.prefixes_received.toLocaleString() : "–" },
+            { key: "i", header: "In Shield", render: (x) => x.in_inventory ? <span className="text-ink-2">Recorded</span>
+                : <span className="text-ink-3" title="Configured on the router but not recorded in Shield">Not recorded</span> },
           ]} />
       </Section>
+      {shieldSessions.length > 0 && <Section title="Shield's own sessions" flush aside={<span className="text-xs text-ink-3">Phase 7</span>}>
+        <Table rows={shieldSessions} rowKey={(x) => String(x.id)}
+          cols={[
+            { key: "n", header: "Session", render: (x) => <><div className="font-medium">{x.name}</div><div className="text-xs text-ink-3">{PURPOSE[x.purpose] ?? x.purpose}</div></> },
+            { key: "e", header: "Peer", render: (x) => <>{x.neighbor_address}<div className="text-xs text-ink-3">AS{x.local_asn} to AS{x.remote_asn}</div></> },
+            { key: "m", header: "Managed by Shield", render: (x) => x.managed_by_shield ? <Badge tone="signal">Yes, max {x.max_prefix_out} routes</Badge> : <span className="text-ink-3">No</span> },
+            { key: "s", header: "State", render: () => <span className="hatch inline-block px-2 text-ink-3">Shield's BGP speaker arrives in phase 7</span> },
+          ]} />
+      </Section>}
+      <Section title="Recent session changes" flush><EventTable rows={bgpEvents} showRouter /></Section>
     </div>
   );
 }

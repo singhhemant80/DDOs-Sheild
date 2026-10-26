@@ -11,6 +11,7 @@ import { Bgp, Customers, Prefixes, Routers } from "./pages/Network";
 import { AuditLog, HealthPage, SettingsPage, Upcoming, Users } from "./pages/Admin";
 import { ActiveAttacks, AttackDetail, AttackHistory } from "./pages/Attacks";
 import { LiveProvider } from "./lib/live";
+import { RouterDetail, Topology } from "./pages/Routers";
 
 function App() {
   const { me, ready } = useAuth();
@@ -36,12 +37,11 @@ function App() {
         <Route path="alerts" element={<Upcoming title="Alerts" phase={10}>
           <p>Email, Telegram and webhook notifications for attacks, mitigation changes, BGP session loss and saturated links, with de-duplication and escalation.</p>
         </Upcoming>} />
-        <Route path="topology" element={<Upcoming title="Topology" phase={5}>
-          <p>A live map of edge routers, upstream links and BGP sessions, built from what the routers report once Shield can read them.</p>
-        </Upcoming>} />
+        <Route path="topology" element={<Topology />} />
         <Route path="prefixes" element={<Prefixes />} />
         <Route path="customers" element={<Customers />} />
         <Route path="routers" element={<Routers />} />
+        <Route path="routers/:id" element={<RouterDetail />} />
         <Route path="bgp" element={<Bgp />} />
         <Route path="users" element={<Users />} />
         <Route path="settings" element={<SettingsPage />} />

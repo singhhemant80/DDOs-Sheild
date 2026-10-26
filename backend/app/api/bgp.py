@@ -9,7 +9,7 @@ from .. import audit
 from ..changes import record_change
 from ..db import get_db
 from ..deps import Principal, require
-from ..models import BgpNeighbor, Router, UpstreamProvider
+from ..models import BgpNeighbor, Router, RouterState, UpstreamProvider
 from ..rbac import Perm
 from ..schemas import BgpNeighborCreate, BgpNeighborOut
 
@@ -19,6 +19,28 @@ router = APIRouter(prefix="/bgp", tags=["bgp"])
 @router.get("/neighbors", response_model=list[BgpNeighborOut])
 def list_neighbors(_: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
     return db.execute(select(BgpNeighbor).order_by(BgpNeighbor.name)).scalars().all()
+
+
+@router.get("/sessions")
+def live_sessions(_: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
+    """BGP sessions as last read from each router, matched to the neighbour inventory.
+    `in_inventory` is false for sessions configured on the router but not recorded in Shield."""
+    inv = {(n.router_id, str(n.neighbor_address)): n for n in db.execute(select(BgpNeighbor)).scalars()}
+    names = dict(db.execute(select(Router.id, Router.name)).all())
+    out = []
+    for st, name in db.execute(select(RouterState, Router.name).join(Router, Router.id == RouterState.router_id)):
+        for peer in st.bgp or []:
+            n = inv.pop((st.router_id, peer.get("remote_address")), None)
+            out.append({**peer, "router_id": st.router_id, "router": name, "polled_at": st.polled_at,
+                        "stale": not st.ok, "in_inventory": n is not None, "neighbor_id": n.id if n else None,
+                        "purpose": n.purpose.value if n else None})
+    for (rid, addr), n in inv.items():
+        if rid is not None:
+            out.append({"name": n.name, "remote_address": addr, "remote_as": n.remote_asn, "router_id": rid,
+                        "router": names.get(rid), "state": n.last_state or "unknown", "established": False,
+                        "in_inventory": True, "neighbor_id": n.id, "purpose": n.purpose.value,
+                        "missing_on_router": n.last_state == "not_configured", "stale": True})
+    return out
 
 
 @router.post("/neighbors", response_model=BgpNeighborOut, status_code=201)

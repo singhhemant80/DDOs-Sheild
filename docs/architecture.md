@@ -68,7 +68,7 @@ flowchart LR
 | `shield-collector` | Go | Decode NetFlow v9/IPFIX/sFlow, apply sampling rate, emit 1 s per-destination rollups to Redis and minute aggregates to ClickHouse; poll SNMP/RouterOS counters | 3 |
 | `shield-detector` | Python | Rolling-window and baseline-deviation detection per destination and per prefix; vector classification; confidence scoring; suspected → confirmed state machine | 4 |
 | `shield-mitigator` | Python | Policy evaluation, action planning, impact preview, approval gate, execution with idempotency keys, verification, recovery timers, flap dampening | 6–8 |
-| MikroTik adapter | Python (librouteros) | Version-aware RouterOS v7 adapter. Read-only mode first; writes limited to Shield-owned address lists, routing filters and routes tagged with a Shield comment | 5, 8 |
+| MikroTik adapter (`shield-mikrotik`) | Python, own RouterOS API client (no third-party library) | Version-aware RouterOS v7 adapter. Read-only mode first; writes limited to Shield-owned address lists, routing filters and routes tagged with a Shield comment | 5, 8 |
 | FRR | C (system pkg) | BGP speaker for RTBH and steering announcements, driven via `vtysh`/config fragments, strictly prefix-filtered | 7 |
 | Dashboard | React, TS, Tailwind | 17 pages listed in the master spec; live updates over WebSocket | 3+ |
 

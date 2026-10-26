@@ -23,13 +23,13 @@ function Util({ v, prov }: { v: number; prov: Provenance }) {
 
 export function InterfaceList({ rows }: { rows: Iface[] }) {
   return (
-    <Table dense rows={rows} rowKey={(r) => `${r.agent}|${r.if_index}`}
+    <Table dense rows={rows} rowKey={(r) => `${r.agent}|${r.if_name ?? r.if_index}`}
       empty={<>No interface counters yet. Configure the SNMP poller or sFlow counter export on the edge routers.</>}
       cols={[
         { key: "name", header: "Link", render: (r) => (
           <div>
             <div className="font-medium">{r.upstream ?? r.if_name ?? `ifIndex ${r.if_index}`}</div>
-            <div className="text-xs text-ink-3">{r.router ?? r.agent}, {r.source === "snmp" ? "SNMP" : "sFlow"} {ago(r.ts)}</div>
+            <div className="text-xs text-ink-3">{r.router ?? r.agent}, {r.source === "snmp" ? "SNMP" : r.source === "routeros" ? "RouterOS API" : "sFlow"} {ago(r.ts)}</div>
           </div>) },
         { key: "in", header: "In", align: "right", render: (r) => <Num v={r.in_bps} p={r.provenance} fmt={bps} /> },
         { key: "util", header: "Load", className: "w-[34%]", render: (r) => (
