@@ -6,13 +6,29 @@ Target: a dedicated server or Proxmox VM on the **management VLAN**, Ubuntu Serv
 ## Install / upgrade
 
 ```bash
-git clone <this repo> && cd crapplet-ddos-shield
-sudo deploy/scripts/install.sh          # idempotent; re-run to upgrade
+curl -fsSL https://raw.githubusercontent.com/singhhemant80/DDOs-Sheild/main/install.sh | sudo bash
 ```
 
-The installer creates the `shield` system user, a venv in `/opt/crapplet-shield/venv`, the
-`shield` PostgreSQL role and database, `/etc/crapplet-shield/shield.env` with generated secrets,
-runs migrations, and enables:
+The bootstrap downloads the latest release bundle for the server's CPU (amd64 or arm64) and
+verifies its SHA-256, or, if no release exists, builds from source with temporary Go and Node
+toolchains that are verified against their published checksums and deleted afterwards. It then
+runs `deploy/scripts/install.sh`, which:
+
+- installs PostgreSQL, Redis, ClickHouse LTS (official repository) and nginx
+- creates the `shield` system user, `/opt/crapplet-shield`, and `/etc/crapplet-shield/*.env` with
+  generated secrets (never overwritten on upgrade)
+- runs database migrations and applies the ClickHouse schema
+- creates the first administrator (only if no users exist) and prints the password once
+- creates a self-signed certificate and an nginx site that only answers the management networks
+- enables:
+
+**Offline servers:** run the same command with `SHIELD_DOWNLOAD_ONLY=/tmp/shield` on a machine
+with Internet access, copy `/tmp/shield` across, and run `sudo /tmp/shield/deploy/scripts/install.sh`.
+The server still needs its OS package repositories (or a local mirror) for PostgreSQL, Redis,
+ClickHouse and nginx.
+
+**Releases:** pushing a tag `vX.Y.Z` makes GitHub Actions build and publish
+`crapplet-shield-vX.Y.Z-linux-{amd64,arm64}.tar.gz` with `.sha256` files.
 
 | Unit | Purpose |
 |---|---|
@@ -22,10 +38,10 @@ runs migrations, and enables:
 | `shield-collector.service` | Flow collector (enabled once `/etc/crapplet-shield/collector.json` exists) |
 | `shield-snmp-poller.service` | Interface counters (enabled once `snmp-poller.json` exists) |
 
-Build first on a machine with Go 1.22+ and Node 20.19+: `make` produces `collector/bin/` and
-`frontend/dist/`; the server itself needs neither toolchain. The installer also sets up Redis
-(localhost, password) and ClickHouse LTS from ClickHouse's official repository, applies the
-ClickHouse schema, and creates a `shield` ClickHouse user limited to the `shield` database.
+Redis listens on localhost with a password; ClickHouse gets a `shield` user limited to the `shield`
+database and to local connections. To use your own certificate, replace
+`/etc/crapplet-shield/tls/shield.crt` and `shield.key` and run `systemctl reload nginx`. To edit the
+nginx site yourself, delete its first line (`managed-by: ...`) and upgrades will leave it alone.
 
 ## Secrets
 

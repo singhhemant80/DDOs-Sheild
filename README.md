@@ -10,6 +10,27 @@ RouterOS v7 integration, multi-upstream steering, and an operator dashboard.
 > **Nothing in this release talks to a router's configuration or announces a BGP route.**
 > See [docs/roadmap.md](docs/roadmap.md).
 
+## Install
+
+On a fresh Ubuntu 22.04/24.04 or Debian 12 server (or Proxmox VM) on your management network:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/singhhemant80/DDOs-Sheild/main/install.sh | sudo bash
+```
+
+It installs everything (PostgreSQL, Redis, ClickHouse, nginx, the API, collector and dashboard),
+creates an `admin` account, and prints the dashboard address and password when it finishes.
+Run the same command again to upgrade. Options, e.g. your own admin name and the networks
+allowed to reach the dashboard:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/singhhemant80/DDOs-Sheild/main/install.sh \
+  | sudo SHIELD_ADMIN_USER=hemant SHIELD_MGMT_NETS="10.255.0.0/24 10.254.0.0/24" bash
+```
+
+All options are listed at the top of [install.sh](install.sh). Then point your routers at it:
+[docs/collector.md](docs/collector.md).
+
 ## Repository layout
 
 | Path | Contents |
