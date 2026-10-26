@@ -4,11 +4,11 @@ On-premises DDoS detection and mitigation platform for hosting providers, ISPs a
 data centres: flow-based detection, BGP RTBH (upstream and internal), MikroTik
 RouterOS v7 integration, multi-upstream steering, and an operator dashboard.
 
-> **Status: Phase 2 of 10.** This repository currently contains the design
-> (Phase 1) and the foundational backend (Phase 2): database schema and migrations,
-> authentication, RBAC, MFA, tamper-evident audit log, and configuration APIs for
-> prefixes, routers, upstreams and BGP neighbours. **Nothing in this release talks
-> to a router or announces a BGP route.** See [docs/roadmap.md](docs/roadmap.md).
+> **Status: Phase 3 of 10.** Design (Phase 1), foundational backend (Phase 2), and live traffic
+> (Phase 3): a dependency-free Go flow collector for NetFlow v9 / IPFIX / sFlow, SNMP interface
+> polling, ClickHouse history, and the operations dashboard with live streaming charts.
+> **Nothing in this release talks to a router's configuration or announces a BGP route.**
+> See [docs/roadmap.md](docs/roadmap.md).
 
 ## Repository layout
 
@@ -16,6 +16,8 @@ RouterOS v7 integration, multi-upstream steering, and an operator dashboard.
 |---|---|
 | `docs/` | Architecture, network topology, threat model, tech stack, roadmap, API notes |
 | `backend/` | Python FastAPI management API, SQLAlchemy models, Alembic migrations, tests |
+| `collector/` | Go: flow collector, SNMP poller, lab flow generator, ClickHouse schema ([docs/collector.md](docs/collector.md)) |
+| `frontend/` | React + TypeScript dashboard (Vite, Tailwind, uPlot), fonts self-hosted |
 | `config/` | Example network inventory (AS154950 lab values — examples only) |
 | `deploy/` | systemd units, environment template, install script, nginx TLS front-end |
 
@@ -33,10 +35,21 @@ python -m app.cli create-admin --username admin   # prompts for password
 uvicorn app.main:app --host 127.0.0.1 --port 8080
 ```
 
-OpenAPI docs: `http://127.0.0.1:8080/api/docs` (disabled when `SHIELD_ENV=production`
+OpenAPI docs: `http://127.0.0.1:8080/api/v1/docs` (disabled when `SHIELD_ENV=production`
 unless `SHIELD_EXPOSE_DOCS=true`).
 
-Run tests: `SHIELD_TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1/shield_test pytest`
+Run tests: `make test` (Go) and `SHIELD_TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1/shield_test pytest`
+in `backend/`. Optional: `SHIELD_TEST_REDIS_URL`, `SHIELD_TEST_CLICKHOUSE_URL` enable the live-data tests.
+
+### Live traffic in development
+
+```bash
+make collector                                   # builds collector/bin/*
+redis-server &                                   # and ClickHouse; apply collector/clickhouse/001_schema.sql
+collector/bin/shield-collector -config deploy/collector/collector.example.json   # edit exporters first
+collector/bin/shield-flowgen -scenario udp-flood -victim 163.5.191.20            # synthetic lab feed
+cd frontend && npm ci && npm run dev             # http://127.0.0.1:5173, proxies /api to :8080
+```
 
 ## Production
 

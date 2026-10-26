@@ -4,8 +4,8 @@
 |---|---|---|---|
 | 1 | Requirements, architecture, threat model, network design | Docs in `docs/` reviewed | **Done** |
 | 2 | DB schema + migrations, auth (Argon2id, JWT, refresh rotation, TOTP), RBAC, audit chain, config APIs | Migrations apply cleanly; test suite green; all non-public routes require auth | **Done** |
-| 3 | Go flow collector (NetFlow v9/IPFIX/sFlow), SNMP/RouterOS counter poller, ClickHouse schema, live traffic dashboard | Synthetic flow replay shows correct per-destination pps/bps with provenance tags | Next |
-| 4 | Detection engine, baselines, incident management UI | Lab scenarios: UDP/SYN flood-like patterns detected; benign spike not escalated | |
+| 3 | Go flow collector (NetFlow v9/IPFIX/sFlow), SNMP counter poller, ClickHouse schema, live traffic dashboard | Synthetic flow replay shows correct per-destination pps/bps with provenance tags | **Done** (see docs/collector.md for measured accuracy) |
+| 4 | Detection engine, baselines, incident management UI | Lab scenarios: UDP/SYN flood-like patterns detected; benign spike not escalated | Next: consumes `shield:traffic:stream`; `flash-crowd` scenario exists for false-positive tests |
 | 5 | MikroTik read-only integration | Discovery, BGP state, routes, counters from CCR2004 lab unit | |
 | 6 | RTBH controller in simulation mode | Full workflow with dry-run plans, approvals, idempotency, restart reconciliation | |
 | 7 | Staging BGP with FRR, route filters, approval gates | Lab router accepts only authorised /32s; unauthorised and malformed requests rejected | |
@@ -15,6 +15,13 @@
 
 > Note: the master specification document was truncated partway through Phase 9; Phase 9's
 > remaining text and any Phase 10 definition should be supplied before that work starts.
+
+## Phase 3 notes
+
+- RouterOS API-based counter polling moved to Phase 5 with the rest of the MikroTik adapter; SNMP
+  and sFlow counter samples provide measured interface rates now.
+- SNMPv3 is not implemented (v2c read-only, management VLAN only).
+- The collector does not deduplicate traffic exported by two routers; export only on edge interfaces.
 
 ## What is deliberately *not* in Phase 2
 

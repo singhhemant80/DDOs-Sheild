@@ -8,3 +8,6 @@ venv/
 build/
 dist/
 node_modules/
+collector/bin/
+backend/.env
+*.tsbuildinfo

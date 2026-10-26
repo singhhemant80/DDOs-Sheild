@@ -1,4 +1,4 @@
-# Deployment (Phase 2)
+# Deployment
 
 Target: a dedicated server or Proxmox VM on the **management VLAN**, Ubuntu Server 22.04/24.04
 (AlmaLinux 9 best-effort). No Docker required.
@@ -19,6 +19,13 @@ runs migrations, and enables:
 | `shield-api.service` | FastAPI on 127.0.0.1:8080 (hardened systemd sandbox) |
 | `shield-maintenance.timer` | Nightly retention purge + audit-chain verification (unit fails if the chain is broken) |
 | `shield-backup.timer` | Nightly `pg_dump` to `/var/backups/crapplet-shield`, 14-day retention, optional GPG |
+| `shield-collector.service` | Flow collector (enabled once `/etc/crapplet-shield/collector.json` exists) |
+| `shield-snmp-poller.service` | Interface counters (enabled once `snmp-poller.json` exists) |
+
+Build first on a machine with Go 1.22+ and Node 20.19+: `make` produces `collector/bin/` and
+`frontend/dist/`; the server itself needs neither toolchain. The installer also sets up Redis
+(localhost, password) and ClickHouse LTS from ClickHouse's official repository, applies the
+ClickHouse schema, and creates a `shield` ClickHouse user limited to the `shield` database.
 
 ## Secrets
 
@@ -36,8 +43,8 @@ table inet shield {
     ct state established,related accept
     iif lo accept
     ip saddr { 10.255.0.0/24, 10.254.0.0/24 } tcp dport { 22, 443 } accept   # mgmt + VPN
-    # Phase 3: flow export from routers only
-    # ip saddr { 10.255.0.1, 10.255.0.2 } udp dport { 2055, 4739, 6343 } accept
+    # Flow export from routers only
+    ip saddr { 10.255.0.1, 10.255.0.2 } udp dport { 2055, 4739, 6343 } accept
     # Phase 7: BGP from routers only
     # ip saddr { 10.255.0.1, 10.255.0.2 } tcp dport 179 accept
     icmp type echo-request limit rate 10/second accept
@@ -45,7 +52,7 @@ table inet shield {
 }
 ```
 
-PostgreSQL listens on localhost only (Ubuntu default). Do not expose 8080 or 5432.
+PostgreSQL, Redis and ClickHouse listen on localhost only. Do not expose 8080, 5432, 6379, 8123, 9000 or the collector's metrics port 9180.
 
 ## Rollback
 

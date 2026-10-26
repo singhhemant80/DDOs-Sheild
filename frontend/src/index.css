@@ -1,0 +1,133 @@
+@import "tailwindcss";
+@import "@fontsource-variable/archivo/wdth.css";
+
+/* ------------------------------------------------------------------------------------------
+   Design tokens. Light is the default; dark follows the OS unless the user picks a theme.
+   Provenance is a visual language used everywhere numbers or lines appear:
+     measured  = heavy solid      sampled = thin solid
+     estimated = dashed           unavailable = hatched gap
+   ------------------------------------------------------------------------------------------ */
+:root {
+  --paper: #eef1f3;
+  --panel: #ffffff;
+  --sunk: #e3e8ec;
+  --ink: #1b2a34;
+  --ink-2: #4d5d69;
+  --ink-3: #7b8a95;
+  --rule: #c9d2d8;
+  --rule-soft: #dde3e7;
+  --signal: #1f6fb2;      /* inbound traffic */
+  --signal-soft: #d5e5f3;
+  --outbound: #6b7f8e;
+  --attack: #b4232f;
+  --attack-soft: #f6dcde;
+  --warn: #b7791f;
+  --warn-soft: #f6ead3;
+  --ok: #2f855a;
+  --ok-soft: #d8eee2;
+  --hatch: rgba(27, 42, 52, 0.12);
+  --focus: #1f6fb2;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #17222b;
+    --panel: #1e2b35;
+    --sunk: #142029;
+    --ink: #e3e9ed;
+    --ink-2: #a9b6bf;
+    --ink-3: #7b8b96;
+    --rule: #34444f;
+    --rule-soft: #2a3943;
+    --signal: #5aa9e6;
+    --signal-soft: #1d3a52;
+    --outbound: #8fa2b0;
+    --attack: #f0707a;
+    --attack-soft: #4a2228;
+    --warn: #e0a84a;
+    --warn-soft: #463720;
+    --ok: #5cc28d;
+    --ok-soft: #1f3b2e;
+    --hatch: rgba(227, 233, 237, 0.10);
+    --focus: #5aa9e6;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #17222b;
+  --panel: #1e2b35;
+  --sunk: #142029;
+  --ink: #e3e9ed;
+  --ink-2: #a9b6bf;
+  --ink-3: #7b8b96;
+  --rule: #34444f;
+  --rule-soft: #2a3943;
+  --signal: #5aa9e6;
+  --signal-soft: #1d3a52;
+  --outbound: #8fa2b0;
+  --attack: #f0707a;
+  --attack-soft: #4a2228;
+  --warn: #e0a84a;
+  --warn-soft: #463720;
+  --ok: #5cc28d;
+  --ok-soft: #1f3b2e;
+  --hatch: rgba(227, 233, 237, 0.10);
+  --focus: #5aa9e6;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Archivo Variable", "Archivo", ui-sans-serif, system-ui, sans-serif;
+  --color-paper: var(--paper);
+  --color-panel: var(--panel);
+  --color-sunk: var(--sunk);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-rule: var(--rule);
+  --color-rule-soft: var(--rule-soft);
+  --color-signal: var(--signal);
+  --color-signal-soft: var(--signal-soft);
+  --color-outbound: var(--outbound);
+  --color-attack: var(--attack);
+  --color-attack-soft: var(--attack-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+}
+
+html, body, #root { height: 100%; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  font-feature-settings: "tnum" 1;   /* every number lines up */
+  -webkit-font-smoothing: antialiased;
+}
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.condensed { font-stretch: 82%; }
+.wide { font-stretch: 112%; }
+
+/* Hatched fill = "no data". Used for empty chart spans and unavailable values. */
+.hatch {
+  background-image: repeating-linear-gradient(135deg, var(--hatch) 0 2px, transparent 2px 7px);
+}
+
+/* Provenance underline for numbers */
+.prov-measured { border-bottom: 2.5px solid currentColor; }
+[class^="prov-"] { white-space: nowrap; }
+.prov-sampled { border-bottom: 1px solid color-mix(in srgb, currentColor 35%, transparent); }
+.prov-estimated { border-bottom: 1.5px dashed currentColor; }
+.prov-unavailable { color: var(--ink-3); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* uPlot base */
+.uplot { font-family: var(--font-sans); }
+.u-legend { display: none; }

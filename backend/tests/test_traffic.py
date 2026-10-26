@@ -197,6 +197,8 @@ def test_destination_series_and_top(client, engineer, ch_db):
     s = client.get("/api/v1/traffic/destinations/163.5.191.20?minutes=5", headers=engineer).json()
     assert s["available"] and s["source"] == "dst_1s" and len(s["points"]) == 30
     assert max(p["pps"] for p in s["points"]) == 30000
+    # Timestamps must round-trip as UTC whatever the ClickHouse server's time zone is.
+    assert abs(s["points"][-1]["t"] - now) <= 5
     top = client.get("/api/v1/traffic/top?minutes=5&limit=1", headers=engineer).json()
     assert top["rows"][0]["dst"] == "163.5.191.20"
 

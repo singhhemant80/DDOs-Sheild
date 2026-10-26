@@ -1,13 +1,14 @@
 -- Crapplet DDoS Shield - ClickHouse schema (Phase 3)
 -- Apply with: clickhouse-client --multiquery < 001_schema.sql
 -- Retention is enforced by TTL; adjust the INTERVALs to your disk budget.
+-- All timestamps are DateTime('UTC'): the collector writes UTC, whatever the server's time zone.
 
 CREATE DATABASE IF NOT EXISTS shield;
 
 -- Per protected destination, per second. Only rows above the collector's store_min_pps.
 CREATE TABLE IF NOT EXISTS shield.dst_1s
 (
-    ts           DateTime CODEC(DoubleDelta, ZSTD),
+    ts           DateTime('UTC') CODEC(DoubleDelta, ZSTD),
     dst          String,
     prefix       LowCardinality(String),
     pps          Float64 CODEC(Gorilla, ZSTD),
@@ -33,7 +34,7 @@ TTL ts + INTERVAL 7 DAY;
 -- Inbound / outbound totals per second.
 CREATE TABLE IF NOT EXISTS shield.totals_1s
 (
-    ts         DateTime CODEC(DoubleDelta, ZSTD),
+    ts         DateTime('UTC') CODEC(DoubleDelta, ZSTD),
     direction  LowCardinality(String),
     pps        Float64,
     bps        Float64,
@@ -51,7 +52,7 @@ TTL ts + INTERVAL 30 DAY;
 -- Measured interface rates (sFlow counter samples, SNMP).
 CREATE TABLE IF NOT EXISTS shield.iface_1s
 (
-    ts        DateTime CODEC(DoubleDelta, ZSTD),
+    ts        DateTime('UTC') CODEC(DoubleDelta, ZSTD),
     agent     LowCardinality(String),
     if_index  UInt32,
     if_name   LowCardinality(String),
@@ -70,7 +71,7 @@ TTL ts + INTERVAL 90 DAY;
 -- Optional raw (sampled) flow records - disabled by default (store_raw_flows).
 CREATE TABLE IF NOT EXISTS shield.flows_raw
 (
-    ts            DateTime,
+    ts            DateTime('UTC'),
     kind          LowCardinality(String),
     exporter      LowCardinality(String),
     src           String,
@@ -92,7 +93,7 @@ TTL ts + INTERVAL 48 HOUR;
 -- 1-minute rollups for long-term history and baselines (Phase 4).
 CREATE TABLE IF NOT EXISTS shield.dst_1m
 (
-    ts       DateTime,
+    ts       DateTime('UTC'),
     dst      String,
     prefix   LowCardinality(String),
     seconds  AggregateFunction(count),
@@ -119,7 +120,7 @@ GROUP BY ts, dst;
 
 CREATE TABLE IF NOT EXISTS shield.totals_1m
 (
-    ts        DateTime,
+    ts        DateTime('UTC'),
     direction LowCardinality(String),
     pps_avg   AggregateFunction(avg, Float64),
     pps_max   AggregateFunction(max, Float64),

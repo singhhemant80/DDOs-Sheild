@@ -54,12 +54,12 @@ def totals(minutes: int = Query(60, ge=1, le=60 * 24 * 90), _: Principal = Depen
         sql = """SELECT toUnixTimestamp(toStartOfInterval(ts, INTERVAL {step:UInt32} SECOND)) AS t, direction,
                         avg(pps) AS pps, avg(bps) AS bps, max(pps) AS pps_max,
                         if(countIf(provenance = 'estimated') > 0, 'estimated', 'sampled') AS provenance
-                 FROM totals_1s WHERE ts >= {since:DateTime} GROUP BY t, direction ORDER BY t"""
+                 FROM totals_1s WHERE ts >= {since:DateTime('UTC')} GROUP BY t, direction ORDER BY t"""
     else:
         sql = """SELECT toUnixTimestamp(toStartOfInterval(ts, INTERVAL {step:UInt32} SECOND)) AS t, direction,
                         avgMerge(pps_avg) AS pps, avgMerge(bps_avg) AS bps, maxMerge(pps_max) AS pps_max,
                         'sampled' AS provenance
-                 FROM totals_1m WHERE ts >= {since:DateTime} GROUP BY t, direction ORDER BY t"""
+                 FROM totals_1m WHERE ts >= {since:DateTime('UTC')} GROUP BY t, direction ORDER BY t"""
     try:
         rows = tm.ch_query(sql, {"step": step, "since": since})
     except tm.ClickHouseUnavailable:
@@ -84,12 +84,12 @@ def destination_series(ip: str, minutes: int = Query(60, ge=1, le=60 * 24 * 90),
                         avg(pps) AS pps, avg(bps) AS bps, avg(tcp_pps) AS tcp_pps, avg(udp_pps) AS udp_pps,
                         avg(icmp_pps) AS icmp_pps, avg(syn_pps) AS syn_pps, avg(frag_pps) AS frag_pps,
                         max(sources_est) AS sources_est, any(provenance) AS provenance
-                 FROM dst_1s WHERE dst = {dst:String} AND ts >= {since:DateTime} GROUP BY t ORDER BY t"""
+                 FROM dst_1s WHERE dst = {dst:String} AND ts >= {since:DateTime('UTC')} GROUP BY t ORDER BY t"""
     else:
         sql = """SELECT toUnixTimestamp(toStartOfInterval(ts, INTERVAL {step:UInt32} SECOND)) AS t,
                         avgMerge(pps_avg) AS pps, avgMerge(bps_avg) AS bps, maxMerge(pps_max) AS pps_max,
                         avgMerge(udp_avg) AS udp_pps, avgMerge(syn_avg) AS syn_pps
-                 FROM dst_1m WHERE dst = {dst:String} AND ts >= {since:DateTime} GROUP BY t ORDER BY t"""
+                 FROM dst_1m WHERE dst = {dst:String} AND ts >= {since:DateTime('UTC')} GROUP BY t ORDER BY t"""
     try:
         rows = tm.ch_query(sql, {"step": step, "since": since, "dst": addr})
     except tm.ClickHouseUnavailable:
@@ -104,7 +104,7 @@ def top_destinations(minutes: int = Query(60, ge=1, le=60 * 24 * 30), limit: int
     since = tm.utc(int(time.time()) - minutes * 60)
     sql = """SELECT dst, any(prefix) AS prefix, max(pps) AS pps_max, avg(pps) AS pps_avg, max(bps) AS bps_max,
                     max(sources_est) AS sources_max, count() AS active_seconds
-             FROM dst_1s WHERE ts >= {since:DateTime}
+             FROM dst_1s WHERE ts >= {since:DateTime('UTC')}
              GROUP BY dst ORDER BY pps_max DESC LIMIT {limit:UInt32}"""
     try:
         rows = tm.ch_query(sql, {"since": since, "limit": limit})

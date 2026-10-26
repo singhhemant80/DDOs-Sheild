@@ -1,0 +1,33 @@
+[Unit]
+Description=Crapplet DDoS Shield SNMP interface counter poller
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=shield
+Group=shield
+EnvironmentFile=-/etc/crapplet-shield/collector.env
+ExecStart=/opt/crapplet-shield/bin/shield-snmp-poller -config /etc/crapplet-shield/snmp-poller.json
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

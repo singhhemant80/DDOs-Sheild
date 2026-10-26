@@ -1,4 +1,4 @@
-# API Guide (v1, Phase 2)
+# API Guide (v1, Phase 3)
 
 Interactive OpenAPI: `/api/v1/docs` (non-production, or `SHIELD_EXPOSE_DOCS=true`).
 Raw spec: `/api/v1/openapi.json`.
@@ -36,6 +36,26 @@ disabling a user revokes sessions immediately.
 | Audit | `GET /audit`, `GET /audit/verify` | — (read) |
 | Settings | `GET /settings`, `PUT /settings/{key}` | Admin |
 | Safety | `POST /system/emergency-stop` (NOC+), `POST /system/automation?enabled=` (Engineer+) | |
+| Traffic | `GET /traffic/live`, `/traffic/history`, `/traffic/totals`, `/traffic/top`, `/traffic/destinations/{ip}`, `/traffic/interfaces`, `/collector/status` | read-only |
+| Live stream | WebSocket `/ws/traffic` | read-only |
+
+## Live traffic WebSocket
+
+```js
+const ws = new WebSocket("wss://shield/api/v1/ws/traffic");
+ws.onopen = () => ws.send(JSON.stringify({ token: accessToken }));   // within 5 s
+ws.onmessage = (e) => {
+  const m = JSON.parse(e.data);
+  // {"type":"ready"} | {"type":"traffic","data":Snapshot} | {"type":"status","available":false,"reason":"..."}
+};
+```
+
+The token travels in a message, not the URL, so it never appears in proxy logs. Sessions are
+re-checked every 30 s; logout or revocation closes the socket with code 4401. Max 5 sockets per user.
+
+Every traffic value carries `provenance`: `measured`, `sampled`, `estimated` or `unavailable`.
+Responses for ClickHouse-backed endpoints include `available: false` and a `reason` instead of an
+error when history storage is down.
 
 ## Enabling RTBH for an upstream (required sequence)
 
@@ -74,6 +94,6 @@ Lowering it (e.g. to /24) is an explicit, audited decision.
 
 ## Coming in later phases
 
-`/traffic`, `/attacks`, `/mitigation` (preview / approve / reject / withdraw with `Idempotency-Key`),
-`/rtbh` (active routes, verify), `/policies`, `/notifications`, and a WebSocket stream at `/api/v1/ws`.
+`/attacks`, `/mitigation` (preview / approve / reject / withdraw with `Idempotency-Key`),
+`/rtbh` (active routes, verify), `/policies`, `/notifications`, and incident events on the WebSocket.
 The database tables for these already exist (see `backend/app/models.py`).

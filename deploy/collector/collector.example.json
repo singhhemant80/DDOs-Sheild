@@ -1,0 +1,36 @@
+{
+  "listen": {
+    "netflow": "10.255.0.10:2055",
+    "ipfix": "10.255.0.10:4739",
+    "sflow": "10.255.0.10:6343"
+  },
+  "read_buffer_bytes": 16777216,
+
+  "exporters": [
+    { "address": "10.255.0.1", "name": "edge-r1" },
+    { "address": "10.255.0.2", "name": "edge-r2" },
+    { "address": "10.255.0.20", "name": "core-sw1", "sampling_rate": 4096 }
+  ],
+  "allow_unknown_exporters": false,
+
+  "static_prefixes": [],
+
+  "redis": { "addr": "127.0.0.1:6379", "db": 0 },
+  "clickhouse": {
+    "enabled": true,
+    "url": "http://127.0.0.1:8123",
+    "database": "shield",
+    "user": "shield",
+    "store_min_pps": 10,
+    "store_raw_flows": false
+  },
+
+  "spread_threshold_ms": 2000,
+  "max_spread_seconds": 120,
+  "max_destinations": 200000,
+  "publish_top": 50,
+  "stream_max_dsts": 5000,
+  "stream_min_pps": 1,
+  "queue_size": 65536,
+  "metrics_listen": "127.0.0.1:9180"
+}

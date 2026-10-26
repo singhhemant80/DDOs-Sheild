@@ -1,0 +1,10 @@
+{
+  "interval_seconds": 10,
+  "timeout_ms": 2000,
+  "targets": [
+    { "name": "edge-r1", "address": "10.255.0.1", "community": "REPLACE-with-a-long-random-ro-community", "if_indexes": [1, 2] },
+    { "name": "edge-r2", "address": "10.255.0.2", "community": "REPLACE-with-a-long-random-ro-community", "if_indexes": [1, 2] }
+  ],
+  "redis": { "addr": "127.0.0.1:6379" },
+  "clickhouse": { "enabled": true, "url": "http://127.0.0.1:8123", "database": "shield", "user": "shield" }
+}
