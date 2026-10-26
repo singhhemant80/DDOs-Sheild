@@ -24,7 +24,7 @@ GENESIS = "0" * 64
 _LOCK_ID = 0x5348_4945_4C44  # "SHIELD"
 
 # Columns never written to audit snapshots.
-REDACT = {"password_hash", "api_password_enc", "mfa_secret_enc", "secret_enc", "refresh_token_hash"}
+REDACT = {"password_hash", "api_password_enc", "mfa_secret_enc", "secret_enc", "refresh_token_hash", "md5_password_enc"}
 
 
 @dataclass

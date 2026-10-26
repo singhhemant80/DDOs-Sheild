@@ -8,6 +8,7 @@ Requires=postgresql.service
 Type=exec
 User=shield
 Group=shield
+SupplementaryGroups=frrvty
 WorkingDirectory=/opt/crapplet-shield/backend
 EnvironmentFile=/etc/crapplet-shield/shield.env
 # Single worker: the in-process rate limiter and (Phase 6+) mitigator lock assume one process.

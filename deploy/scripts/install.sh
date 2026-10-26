@@ -46,7 +46,7 @@ if command -v apt-get >/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
   apt-get install -y -qq ca-certificates curl gnupg openssl rsync nginx postgresql postgresql-contrib \
-    redis-server >/dev/null
+    redis-server frr >/dev/null
   PY=""
   for v in python3.13 python3.12 python3.11; do command -v "$v" >/dev/null && { PY=$v; break; }; done
   if [ -z "$PY" ]; then   # Ubuntu 22.04 ships 3.10; 3.11 is in its standard repositories
@@ -68,7 +68,7 @@ if command -v apt-get >/dev/null; then
   NGINX_LINK=/etc/nginx/sites-enabled/crapplet-shield.conf
 elif command -v dnf >/dev/null; then
   dnf install -y -q ca-certificates curl gnupg2 openssl rsync nginx postgresql-server postgresql-contrib \
-    redis python3.11 python3.11-devel
+    redis python3.11 python3.11-devel frr
   PY=python3.11
   [ -d /var/lib/pgsql/data/base ] || postgresql-setup --initdb
   if ! command -v clickhouse-server >/dev/null; then
@@ -90,6 +90,8 @@ note "$($PY --version), PostgreSQL $PG_MAJOR"
 # ---------------------------------------------------------------- code
 say "Installing Crapplet Shield $(cat "$SRC/VERSION" 2>/dev/null || echo "(source build)")"
 id shield >/dev/null 2>&1 || useradd --system --home-dir "$PREFIX" --shell /usr/sbin/nologin shield
+# vtysh access to Shield's FRR BGP speaker (used only when the bgp_speaker setting is "frr").
+getent group frrvty >/dev/null && usermod -a -G frrvty shield
 [ -x "$SRC/collector/bin/shield-collector" ] || die "collector binaries missing (use a release bundle or run 'make')"
 [ -f "$SRC/frontend/dist/index.html" ] || die "dashboard build missing (use a release bundle or run 'make')"
 install -d -m 0755 "$PREFIX" "$PREFIX/bin" "$PREFIX/frontend" "$PREFIX/clickhouse"
@@ -205,6 +207,28 @@ if [ -n "$NEW_CH_PW" ]; then
   clickhouse-client -q "GRANT SELECT, INSERT ON shield.* TO shield"
 fi
 note "schema applied"
+
+# ---------------------------------------------------------------- FRR (Shield's BGP speaker)
+say "FRR BGP speaker"
+if [ -f /etc/frr/daemons ]; then
+  before=$(sha256sum /etc/frr/daemons)
+  sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons
+  # vty only on loopback. BGP sessions exist only once you add them in Shield and switch the
+  # bgp_speaker setting to "frr"; until then FRR runs with no neighbours.
+  grep -q '^bgpd_options=.*-A 127.0.0.1' /etc/frr/daemons || \
+    sed -i 's/^bgpd_options="\(.*\)"/bgpd_options="\1 -A 127.0.0.1"/' /etc/frr/daemons
+  systemctl enable frr >/dev/null 2>&1
+  # Restart only when its daemon settings changed: a restart drops live BGP sessions (and with them
+  # any blackholes) until the mitigation controller re-applies them.
+  if [ "$before" != "$(sha256sum /etc/frr/daemons)" ]; then
+    systemctl restart frr || die "FRR did not start (journalctl -u frr)"
+  else
+    systemctl is-active --quiet frr || systemctl start frr || die "FRR did not start (journalctl -u frr)"
+  fi
+  note "FRR $(vtysh -c 'show version' 2>/dev/null | sed -n 's/^FRRouting \([0-9.]*\).*/\1/p') running; no BGP sessions until you configure them"
+else
+  note "FRR not found; the FRR speaker will be unavailable (the simulated speaker still works)"
+fi
 
 # ---------------------------------------------------------------- services
 say "Services"

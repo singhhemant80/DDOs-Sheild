@@ -33,7 +33,7 @@ disabling a user revokes sessions immediately.
 | Router status | `GET /routers/states`, `/routers/events?limit=`, `/routers/{id}/state`, `/routers/{id}/events` | read-only |
 | Router checks | `POST /routers/{id}/test` (one read-only connection with the stored credentials; returns checks, account permissions, or the presented certificate fingerprint), `POST /routers/{id}/certificate` (reads the certificate without sending credentials) | Network Engineer |
 | Upstreams | CRUD + `PUT /upstreams/{id}/rtbh-policy`, `POST …/verify`, `…/enable`, `…/disable` | Engineer (disable: NOC) |
-| BGP | `GET/POST /bgp/neighbors`, `DELETE /bgp/neighbors/{id}`, `GET /bgp/sessions` (live from routers, matched to inventory) | Network Engineer |
+| BGP | `GET/POST /bgp/neighbors`, `PATCH/DELETE /bgp/neighbors/{id}` (`environment`, `remote_port`, `ebgp_multihop`, `md5_password` write-only), `GET /bgp/sessions` (live from routers and Shield's FRR), `GET /bgp/receive-filter?format=routeros\|frr` (router import filter for Shield's blackholes, text) | Network Engineer |
 | Customers | `GET/POST /customers/ips`, `DELETE /customers/ips/{id}` | Network Engineer |
 | Audit | `GET /audit`, `GET /audit/verify` | — (read) |
 | Settings | `GET /settings`, `PUT /settings/{key}` | Admin |

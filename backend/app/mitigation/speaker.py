@@ -28,6 +28,10 @@ class SpeakerError(RuntimeError):
     pass
 
 
+class SpeakerRefused(SpeakerError):
+    """The request itself is not allowed (not a transient fault): the action fails at once."""
+
+
 @dataclass(frozen=True)
 class Route:
     """One announcement: a prefix towards one peer (an upstream, or "internal" for own routers)."""
@@ -65,6 +69,19 @@ class Speaker(Protocol):
     def announce(self, route: Route) -> None: ...
     def withdraw(self, route: Route) -> None: ...
     def routes(self) -> dict[str, Route]: ...
+    # Optional: verify(route) -> str | None (problem description), sync(), peer_status() -> list[dict]
+
+
+def make_speaker(name: str, rds: redis.Redis, sessions):
+    """'simulated' (default) or 'frr'. FRR location can be overridden for labs and tests with
+    SHIELD_FRR_VTYSH / SHIELD_FRR_PATHSPACE."""
+    if name == "frr":
+        import os
+
+        from .frr import FrrSpeaker
+        return FrrSpeaker(sessions, rds, vtysh=os.environ.get("SHIELD_FRR_VTYSH", "vtysh"),
+                          pathspace=os.environ.get("SHIELD_FRR_PATHSPACE") or None)
+    return SimulatedSpeaker(rds)
 
 
 class SimulatedSpeaker:

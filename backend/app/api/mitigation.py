@@ -23,7 +23,7 @@ from ..deps import Principal, require
 from ..detector.engine import VECTOR_SPECIFICITY
 from ..mitigation import service
 from ..mitigation.planner import RTBH_STRATEGIES, PlanRequest, build_plan
-from ..mitigation.speaker import SimulatedSpeaker, SpeakerError
+from ..mitigation.speaker import SpeakerError
 from ..mitigation.state import action_out
 from ..models import (
     ActionState, AttackIncident, MitigationAction, MitigationActionEvent, MitigationPolicy, RtbhRoute, RtbhStatus,
@@ -231,7 +231,9 @@ def routes(state: str = Query("live", pattern="^(live|all)$"), limit: int = Quer
     ups, _u = _names(db)
     ledger = [_route_out(r, ups) for r in db.execute(q).scalars()]
     try:
-        rib = SimulatedSpeaker(tm.rds()).routes()
+        from ..db import session_factory
+        from ..mitigation.speaker import make_speaker
+        rib = make_speaker(get_setting(db, "bgp_speaker", "simulated"), tm.rds(), session_factory()).routes()
         speaker = {"available": True, "routes": [
             {"key": k, "prefix": r.prefix, "peer": r.peer, "communities": list(r.communities), "next_hop": r.next_hop,
              "no_export": r.no_export, "action_id": r.action_id,
@@ -239,7 +241,7 @@ def routes(state: str = Query("live", pattern="^(live|all)$"), limit: int = Quer
             for k, r in sorted(rib.items())]}
     except (SpeakerError, ValueError) as e:
         speaker = {"available": False, "reason": str(e), "routes": []}
-    return {"simulation": True, "ledger": ledger, "speaker": speaker,
+    return {"simulation": get_setting(db, "bgp_speaker", "simulated") == "simulated", "ledger": ledger, "speaker": speaker,
             "limit": int(get_setting(db, "global_max_rtbh_routes", 50))}
 
 
@@ -251,8 +253,10 @@ def controller_status(_: Principal = Depends(require(Perm.VIEW)), db: Session = 
         raw = None
     st = json.loads(raw) if raw else None
     counts = dict(db.execute(select(MitigationAction.state, func.count()).group_by(MitigationAction.state)).all())
+    speaker = get_setting(db, "bgp_speaker", "simulated")
     return {
-        "mode": "simulation", "controller": st, "running": st is not None,
+        "mode": "simulation" if speaker == "simulated" else "staging", "speaker": speaker,
+        "controller": st, "running": st is not None,
         "counts": {k.value: v for k, v in counts.items()},
         "automation_enabled": get_setting(db, "automation_enabled", False),
         "emergency_stop": get_setting(db, "rtbh_emergency_disable", False),

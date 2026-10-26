@@ -83,11 +83,21 @@ function useMitigationEvents(fn: () => void) {
 }
 
 export function SimulationBanner() {
+  const st = useApi<{ mode: string }>("/mitigation/status", 30_000);
+  if (st.data?.mode === "staging") {
+    return (
+      <Notice tone="signal">
+        <span className="inline-flex items-start gap-2"><FlaskConical size={16} className="mt-0.5 shrink-0" />
+          <span><strong>Staging.</strong> Approved actions are announced by Shield's FRR BGP speaker, only to sessions marked
+            staging (lab routers). Production sessions are not configured until phase 8.</span></span>
+      </Notice>
+    );
+  }
   return (
     <Notice tone="warn">
       <span className="inline-flex items-start gap-2"><FlaskConical size={16} className="mt-0.5 shrink-0" />
         <span><strong>Simulation.</strong> Approved actions go through the whole workflow against a simulated BGP speaker.
-          Nothing is announced to any router or provider. Real announcements start in phase 8, after the phase 7 staging tests.</span></span>
+          Nothing is announced to any router or provider. Switch the bgp_speaker setting to FRR to use staging sessions.</span></span>
     </Notice>
   );
 }

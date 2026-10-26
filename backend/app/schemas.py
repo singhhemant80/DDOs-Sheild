@@ -356,6 +356,11 @@ class BgpNeighborCreate(BaseModel):
     max_prefix_out: int | None = Field(None, ge=1, le=100000)
     enabled: bool = True
     managed_by_shield: bool = False
+    environment: str = Field("staging", pattern=r"^(staging|production)$")
+    remote_port: int = Field(179, ge=1, le=65535)
+    ebgp_multihop: int | None = Field(None, ge=1, le=255)
+    md5_password: str | None = Field(None, pattern=r"^[A-Za-z0-9._-]{8,80}$")
+    description: str | None = Field(None, max_length=200)
 
     @field_validator("local_asn", "remote_asn")
     @classmethod
@@ -394,8 +399,30 @@ class BgpNeighborOut(_Out):
     managed_by_shield: bool
     last_state: str | None
     last_state_change_at: datetime | None
+    environment: str = "staging"
+    remote_port: int = 179
+    ebgp_multihop: int | None = None
+    has_md5_password: bool = False
+    description: str | None = None
 
     _a = field_validator("neighbor_address", "local_address", mode="before")(_str)
+
+
+class BgpNeighborUpdate(BaseModel):
+    enabled: bool | None = None
+    environment: str | None = Field(None, pattern=r"^(staging|production)$")
+    remote_port: int | None = Field(None, ge=1, le=65535)
+    ebgp_multihop: int | None = Field(None, ge=1, le=255)
+    max_prefix_out: int | None = Field(None, ge=1, le=100000)
+    local_address: str | None = None
+    md5_password: str | None = Field(None, pattern=r"^([A-Za-z0-9._-]{8,80})?$")  # "" clears
+    description: str | None = Field(None, max_length=200)
+
+    @field_validator("local_address")
+    @classmethod
+    def _addr(cls, v):
+        import ipaddress
+        return None if not v else str(ipaddress.ip_address(v.strip()))
 
 
 # ---------------------------------------------------------------- customers

@@ -53,10 +53,11 @@ def propose(db: Session, req: PlanRequest, *, key: str, actor: str, user_id=None
             id=uuid.uuid4(), idempotency_key=f"{key}#{r['peer']}"[:128], group_id=group,
             incident_id=uuid.UUID(req.incident_id) if req.incident_id else None, policy_id=policy_id,
             strategy=Strategy(req.strategy), target=plan["target"], protected_prefix_id=plan["protected_prefix_id"],
-            upstream_id=r["upstream_id"], state=None, dry_run=True, automatic=req.automatic,
+            upstream_id=r["upstream_id"], state=None, dry_run=plan.get("simulation", True), automatic=req.automatic,
             requested_by_id=user_id, timeout_seconds=60,
             plan={"route": r, "checks": plan["checks"], "duration_seconds": plan["duration_seconds"],
-                  "request_fingerprint": fp, "simulation": True},
+                  "request_fingerprint": fp, "simulation": plan.get("simulation", True),
+                  "speaker": plan.get("speaker", "simulated")},
             impact=plan["impact"], expected_state={"announced": [r["peer"] + "|" + r["prefix"]]})
         db.add(a)
         transition(db, a, S.PROPOSED, actor, "proposed", automatic=req.automatic)

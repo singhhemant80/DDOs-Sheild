@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Plus } from "lucide-react";
-import { api } from "../lib/api";
+import { accessToken, api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useApi } from "../lib/hooks";
 import { dateTime } from "../lib/format";
@@ -273,32 +273,61 @@ function PolicyDialog({ up, onClose, onSaved }: { up: Upstream; onClose: () => v
 }
 
 // ================================================================ BGP
-type Neighbor = { id: number; name: string; router_id: number | null; purpose: string; local_asn: number; remote_asn: number;
-  neighbor_address: string; enabled: boolean; managed_by_shield: boolean; max_prefix_out: number | null; last_state: string | null; last_state_change_at: string | null };
+type Neighbor = { id: number; name: string; router_id: number | null; upstream_id: number | null; purpose: string; local_asn: number;
+  remote_asn: number; neighbor_address: string; local_address: string | null; enabled: boolean; managed_by_shield: boolean;
+  max_prefix_out: number | null; last_state: string | null; last_state_change_at: string | null; environment: string;
+  remote_port: number; ebgp_multihop: number | null; has_md5_password: boolean; description: string | null };
 
 const PURPOSE: Record<string, string> = {
-  transit: "Transit", ibgp: "iBGP", rtbh_signal: "Shield to router (blackhole signalling)",
-  rtbh_upstream: "Dedicated upstream blackhole session", steering: "Steering",
+  transit: "Transit", ibgp: "iBGP", rtbh_signal: "Shield to your routers (internal blackholing)",
+  rtbh_upstream: "Shield to a provider's blackhole service", steering: "Steering",
 };
 
-type Session = Peer & { router_id: number; router: string | null; polled_at?: string; stale: boolean; in_inventory: boolean;
-  neighbor_id: number | null; purpose: string | null; missing_on_router?: boolean };
+type Session = Peer & { router_id: number | null; router: string | null; polled_at?: string; stale: boolean; in_inventory: boolean;
+  neighbor_id: number | null; purpose: string | null; missing_on_router?: boolean; shield?: boolean; environment?: string;
+  prefixes_sent?: number | null; uptime?: string | null };
 
 export function Bgp() {
+  const { can } = useAuth();
   const n = useApi<Neighbor[]>("/bgp/neighbors");
-  const live = useApi<Session[]>("/bgp/sessions", 15_000);
+  const live = useApi<Session[]>("/bgp/sessions", 10_000);
   const r = useApi<Router[]>("/routers");
   const events = useApi<RouterEvent[]>("/routers/events?limit=200", 30_000);
-  const rname = (id: number | null) => id == null ? "Shield (FRR)" : r.data?.find((x) => x.id === id)?.name ?? "–";
-  const shieldSessions = (n.data ?? []).filter((x) => x.router_id == null);
+  const st = useApi<{ speaker: string }>("/mitigation/status", 30_000);
+  const [edit, setEdit] = useState<Neighbor | "new" | null>(null);
+  const [filter, setFilter] = useState(false);
+  const rname = (id: number | null) => id == null ? "Shield" : r.data?.find((x) => x.id === id)?.name ?? "–";
+  const routerSessions = (live.data ?? []).filter((x) => !x.shield);
+  const shieldSessions = (live.data ?? []).filter((x) => x.shield);
+  const nb = (id: number | null) => n.data?.find((x) => x.id === id);
   const bgpEvents = (events.data ?? []).filter((e) => e.kind.startsWith("bgp_")).slice(0, 30);
+  const frr = st.data?.speaker === "frr";
   return (
     <div className="space-y-5">
       <PageHeader title="BGP sessions"
-        description="Sessions as the routers report them, every 30 seconds, matched against the sessions recorded in Shield." />
+        description="Your routers' sessions as they report them, and the sessions Shield's own BGP speaker uses to send blackhole routes." />
       <ErrorLine error={live.error ?? n.error} />
-      <Section title="On the routers" flush>
-        <Table rows={live.data ?? []} rowKey={(x) => `${x.router_id}|${x.remote_address}`}
+      <Section title="Shield's sessions" flush aside={<div className="flex gap-2">
+          <Button onClick={() => setFilter(true)}>Router filter</Button>
+          {can("config_network") && <Button onClick={() => setEdit("new")}><Plus size={16} /> Add session</Button>}</div>}>
+        {!frr && <div className="px-4 pt-3"><Notice>The BGP speaker is set to <strong>simulated</strong>, so these sessions are not
+          configured in FRR. Switch the <code>bgp_speaker</code> setting to FRR under Settings to use them.</Notice></div>}
+        <Table rows={shieldSessions} rowKey={(x) => String(x.neighbor_id)} onRow={can("config_network") ? (x) => setEdit(nb(x.neighbor_id) ?? null) : undefined}
+          empty="No sessions yet. Add one to a lab router to test blackholing end to end."
+          cols={[
+            { key: "n", header: "Session", render: (x) => <><div className="font-medium">{x.name}
+              {x.environment === "production" ? <> <Badge tone="warn">Production</Badge></> : <> <Badge>Staging</Badge></>}</div>
+              <div className="text-xs text-ink-3">{x.purpose ? PURPOSE[x.purpose] ?? x.purpose : ""}</div></> },
+            { key: "e", header: "Peer", render: (x) => <>{x.remote_address}<div className="text-xs text-ink-3">AS{x.remote_as}</div></> },
+            { key: "s", header: "State", render: (x) => x.environment === "production"
+                ? <span className="text-ink-3">Not configured until phase 8</span>
+                : !frr ? <span className="text-ink-3">Speaker simulated</span>
+                : <Lamp tone={x.established ? "ok" : "attack"} label={x.established ? `Established ${x.uptime ?? ""}` : x.state} /> },
+            { key: "p", header: "Routes sent", align: "right", render: (x) => x.prefixes_sent ?? "–" },
+          ]} />
+      </Section>
+      <Section title="On your routers" flush>
+        <Table rows={routerSessions} rowKey={(x) => `${x.router_id}|${x.remote_address}`}
           empty="No sessions read yet. Add routers with API credentials under Routers & upstreams."
           cols={[
             { key: "n", header: "Session", render: (x) => <><div className="font-medium">{x.name}</div>
@@ -312,16 +341,98 @@ export function Bgp() {
                 : <span className="text-ink-3" title="Configured on the router but not recorded in Shield">Not recorded</span> },
           ]} />
       </Section>
-      {shieldSessions.length > 0 && <Section title="Shield's own sessions" flush aside={<span className="text-xs text-ink-3">Phase 7</span>}>
-        <Table rows={shieldSessions} rowKey={(x) => String(x.id)}
-          cols={[
-            { key: "n", header: "Session", render: (x) => <><div className="font-medium">{x.name}</div><div className="text-xs text-ink-3">{PURPOSE[x.purpose] ?? x.purpose}</div></> },
-            { key: "e", header: "Peer", render: (x) => <>{x.neighbor_address}<div className="text-xs text-ink-3">AS{x.local_asn} to AS{x.remote_asn}</div></> },
-            { key: "m", header: "Managed by Shield", render: (x) => x.managed_by_shield ? <Badge tone="signal">Yes, max {x.max_prefix_out} routes</Badge> : <span className="text-ink-3">No</span> },
-            { key: "s", header: "State", render: () => <span className="hatch inline-block px-2 text-ink-3">Shield's BGP speaker arrives in phase 7</span> },
-          ]} />
-      </Section>}
       <Section title="Recent session changes" flush><EventTable rows={bgpEvents} showRouter /></Section>
+      {edit && <SessionDialog session={edit === "new" ? null : edit} onClose={() => setEdit(null)} onDone={() => { n.reload(); live.reload(); }} />}
+      {filter && <FilterDialog onClose={() => setFilter(false)} />}
     </div>
+  );
+}
+
+type UpstreamLite = { id: number; name: string; asn: number };
+
+function SessionDialog({ session, onClose, onDone }: { session: Neighbor | null; onClose: () => void; onDone: () => void }) {
+  const ups = useApi<UpstreamLite[]>("/upstreams");
+  const [f, setF] = useState({
+    name: session?.name ?? "", purpose: session?.purpose ?? "rtbh_signal", upstream_id: session?.upstream_id ? String(session.upstream_id) : "",
+    local_asn: String(session?.local_asn ?? ""), remote_asn: String(session?.remote_asn ?? ""), neighbor_address: session?.neighbor_address ?? "",
+    local_address: session?.local_address ?? "", remote_port: String(session?.remote_port ?? 179), ebgp_multihop: session?.ebgp_multihop ? String(session.ebgp_multihop) : "",
+    max_prefix_out: String(session?.max_prefix_out ?? 50), md5_password: "", environment: session?.environment ?? "staging", enabled: session?.enabled ?? true,
+  });
+  const [err, setErr] = useState<string | null>(null);
+  const set = (k: string, v: unknown) => setF((x) => ({ ...x, [k]: v }));
+  const num = (v: string) => (v ? Number(v) : null);
+  const save = async () => {
+    setErr(null);
+    try {
+      if (session) {
+        await api(`/bgp/neighbors/${session.id}`, { method: "PATCH", body: {
+          enabled: f.enabled, environment: f.environment, remote_port: Number(f.remote_port), ebgp_multihop: num(f.ebgp_multihop),
+          max_prefix_out: Number(f.max_prefix_out), local_address: f.local_address || null,
+          ...(f.md5_password ? { md5_password: f.md5_password } : {}) } });
+      } else {
+        const up = ups.data?.find((u) => String(u.id) === f.upstream_id);
+        await api("/bgp/neighbors", { method: "POST", body: {
+          name: f.name, purpose: f.purpose, upstream_id: f.purpose === "rtbh_upstream" ? Number(f.upstream_id) : null,
+          local_asn: Number(f.local_asn), remote_asn: f.purpose === "rtbh_upstream" && up ? up.asn : Number(f.remote_asn),
+          neighbor_address: f.neighbor_address.trim(), local_address: f.local_address.trim() || null, remote_port: Number(f.remote_port),
+          ebgp_multihop: num(f.ebgp_multihop), max_prefix_out: Number(f.max_prefix_out), managed_by_shield: true,
+          environment: f.environment, enabled: f.enabled, md5_password: f.md5_password || null } });
+      }
+      onDone(); onClose();
+    } catch (e: any) { setErr(e.message); }
+  };
+  const del = async () => {
+    try { await api(`/bgp/neighbors/${session!.id}`, { method: "DELETE" }); onDone(); onClose(); } catch (e: any) { setErr(e.message); }
+  };
+  return (
+    <Dialog open title={session ? `Edit ${session.name}` : "Add a Shield BGP session"} onClose={onClose}
+      footer={<>{session && <Button variant="danger" onClick={del}>Delete</Button>}
+        <Button variant="quiet" onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save}>Save</Button></>}>
+      <Notice>Start with a lab router marked <strong>staging</strong>. Shield sends nothing but the blackhole routes you approve,
+        accepts nothing from the peer, and never more than the route limit.</Notice>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Name"><Input value={f.name} disabled={!!session} onChange={(e) => set("name", e.target.value)} placeholder="shield-to-lab-r1" /></Field>
+        <Field label="Purpose"><Select value={f.purpose} disabled={!!session} onChange={(v) => set("purpose", v)}
+          options={[["rtbh_signal", "Internal blackholing (your routers)"], ["rtbh_upstream", "Provider blackhole service"]]} /></Field>
+        {f.purpose === "rtbh_upstream" && !session && <Field label="Provider"><Select value={f.upstream_id} onChange={(v) => set("upstream_id", v)}
+          options={[["", "Choose…"], ...(ups.data ?? []).map((u) => [String(u.id), `${u.name} (AS${u.asn})`] as [string, string])]} /></Field>}
+        <Field label="Peer address"><Input value={f.neighbor_address} disabled={!!session} onChange={(e) => set("neighbor_address", e.target.value)} /></Field>
+        <Field label="Shield's address" hint="Source of the session (update-source)"><Input value={f.local_address} onChange={(e) => set("local_address", e.target.value)} /></Field>
+        <Field label="Shield's AS"><Input inputMode="numeric" disabled={!!session} value={f.local_asn} onChange={(e) => set("local_asn", e.target.value)} /></Field>
+        {f.purpose !== "rtbh_upstream" && <Field label="Peer's AS"><Input inputMode="numeric" disabled={!!session} value={f.remote_asn} onChange={(e) => set("remote_asn", e.target.value)} /></Field>}
+        <Field label="Port"><Input inputMode="numeric" value={f.remote_port} onChange={(e) => set("remote_port", e.target.value)} /></Field>
+        <Field label="eBGP multihop" hint="For provider route servers several hops away"><Input inputMode="numeric" value={f.ebgp_multihop} onChange={(e) => set("ebgp_multihop", e.target.value)} /></Field>
+        <Field label="Route limit" hint="Shield never sends more than this"><Input inputMode="numeric" value={f.max_prefix_out} onChange={(e) => set("max_prefix_out", e.target.value)} /></Field>
+        <Field label="TCP MD5 password" hint={session?.has_md5_password ? "Stored encrypted; leave empty to keep" : "Optional; letters, digits . _ -"}>
+          <Input type="password" autoComplete="new-password" value={f.md5_password} onChange={(e) => set("md5_password", e.target.value)} /></Field>
+        <Field label="Environment"><Select value={f.environment} onChange={(v) => set("environment", v)}
+          options={[["staging", "Staging (lab)"], ["production", "Production (used from phase 8)"]]} /></Field>
+        <div className="pt-6"><Check label="Enabled" checked={f.enabled} onChange={(v) => set("enabled", v)} /></div>
+      </div>
+      <ErrorLine error={err} />
+    </Dialog>
+  );
+}
+
+function FilterDialog({ onClose }: { onClose: () => void }) {
+  const [fmt, setFmt] = useState("routeros");
+  const [txt, setTxt] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    setTxt(null); setErr(null);
+    fetch(`/api/v1/bgp/receive-filter?format=${fmt}`, { headers: { Authorization: `Bearer ${accessToken()}` } })
+      .then(async (r) => (r.ok ? setTxt(await r.text()) : setErr((await r.json().catch(() => ({}))).detail ?? r.statusText)))
+      .catch((e) => setErr(String(e)));
+  }, [fmt]);
+  return (
+    <Dialog open title="Router import filter for Shield's blackholes" onClose={onClose}
+      footer={<><Button onClick={() => txt && navigator.clipboard?.writeText(txt)}>Copy</Button><Button variant="primary" onClick={onClose}>Close</Button></>}>
+      <p className="text-sm">Put this on your router's session from Shield. It accepts only blackhole routes inside your protected
+        prefixes, no broader than each allows, carrying the internal blackhole community, and rejects everything else, so
+        even a misbehaving Shield cannot blackhole anything it is not authorised for.</p>
+      <Select value={fmt} onChange={setFmt} options={[["routeros", "MikroTik RouterOS 7"], ["frr", "FRR"]]} />
+      <ErrorLine error={err} />
+      {txt && <pre className="max-h-80 overflow-auto rounded-[2px] bg-sunk p-3 text-[12px] leading-snug">{txt}</pre>}
+    </Dialog>
   );
 }

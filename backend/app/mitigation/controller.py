@@ -1,8 +1,8 @@
 """shield-mitigator: carries out approved mitigation actions and keeps the speaker in step.
 
-Phase 6 runs in SIMULATION: the only speaker is SimulatedSpeaker, so nothing is announced to any
-router or provider. The workflow, safety checks, timings and failure handling are the ones later
-phases use with a real BGP speaker.
+The speaker follows the bgp_speaker setting: SimulatedSpeaker (nothing leaves Shield) or, from
+Phase 7, Shield's FRR, which in this release is configured with staging peers only. The workflow,
+checks, timings and failure handling are the same for both.
 
 Loop (every second):
   1. expire proposals nobody approved in time
@@ -45,7 +45,7 @@ from ..models import (
 )
 from . import service
 from .planner import RTBH_STRATEGIES, PlanRequest, build_plan
-from .speaker import Route, SimulatedSpeaker, Speaker, SpeakerError
+from .speaker import Route, SimulatedSpeaker, Speaker, SpeakerError, SpeakerRefused, make_speaker
 from .state import record, transition
 
 log = logging.getLogger("shield.mitigator")
@@ -73,6 +73,7 @@ class Controller:
         self.rds = rds or redis.Redis.from_url(s.redis_url, socket_timeout=2, socket_connect_timeout=2,
                                                decode_responses=True)
         self.sessions = sessions or session_factory()
+        self._fixed_speaker = speaker is not None
         self.speaker = speaker or SimulatedSpeaker(self.rds)
         self.clock = clock
         self.next_try: dict[uuid.UUID, float] = {}
@@ -101,8 +102,25 @@ class Controller:
         self.leader = False
 
     # ------------------------------------------------------------ one pass
+    def select_speaker(self) -> bool:
+        """Follow the bgp_speaker setting. Returns True if the speaker changed."""
+        if self._fixed_speaker:
+            return False
+        with self.sessions() as db:
+            want = get_setting(db, "bgp_speaker", "simulated")
+        if want == self.speaker.name:
+            return False
+        log.warning("switching BGP speaker from %s to %s", self.speaker.name, want)
+        self.speaker = make_speaker(want, self.rds, self.sessions)
+        return True
+
     def tick(self, *, force_reconcile: bool = False) -> None:
         mono = time.monotonic()
+        try:
+            if self.select_speaker():
+                force_reconcile = True
+        except Exception:
+            log.exception("could not select the BGP speaker")
         steps = [self.expire_proposals, self.execute_pending, self.process_withdrawals, self.rollback_failed,
                  self.process_expiry]
         if force_reconcile or mono - self.last_auto_at >= AUTO_EVERY:
@@ -259,13 +277,17 @@ class Controller:
             timeout = a.timeout_seconds
         # Intent is committed; now talk to the speaker (outside any transaction).
         err = None
+        refused = False
         try:
             self.speaker.announce(expected)
             got = self.speaker.routes().get(expected.key)
             if got is None or not got.same_attributes(expected) or got.action_id != expected.action_id:
                 err = "announced, but the route is not on the speaker as planned"
+            elif hasattr(self.speaker, "verify"):
+                err = self.speaker.verify(expected)   # e.g. FRR: really advertised to every session
         except SpeakerError as e:
             err = str(e)
+            refused = isinstance(e, SpeakerRefused)
         with self.sessions() as db, db.begin():
             a = self._lock(db, aid, S.EXECUTING, S.WITHDRAWING)
             if a is None:
@@ -286,7 +308,8 @@ class Controller:
                     if pol:
                         a.hold_until = now + timedelta(seconds=pol.min_hold_seconds)
                 a.error = None
-                transition(db, a, S.ACTIVE, ACTOR, "active", route=expected.key, simulation=True)
+                transition(db, a, S.ACTIVE, ACTOR, "active", route=expected.key,
+                           simulation=self.speaker.name == "simulated", speaker=self.speaker.name)
                 audit.record(db, audit.SYSTEM_ACTOR, "mitigation.announce", "mitigation_action", a.id,
                              after={"route": (a.plan or {}).get("route", {}).get("description"), "speaker": self.speaker.name})
                 self.next_try.pop(aid, None)
@@ -295,10 +318,11 @@ class Controller:
             a.error = err
             route.last_verify_result = {"ok": False, "at": now.isoformat(), "error": err}
             record(db, a, None, ACTOR, "announce_failed", error=err, attempt=a.attempts)
-            if a.state == S.EXECUTING and (now - started).total_seconds() >= timeout:
+            if a.state == S.EXECUTING and (refused or (now - started).total_seconds() >= timeout):
                 route.status = RtbhStatus.FAILED
                 a.completed_at = now
-                transition(db, a, S.FAILED, ACTOR, "failed", error=f"gave up after {timeout} s: {err}")
+                transition(db, a, S.FAILED, ACTOR, "failed",
+                           error=err if refused else f"gave up after {timeout} s: {err}")
             self._later(aid)
             return 0
 
@@ -396,6 +420,8 @@ class Controller:
     # ------------------------------------------------------------ 6. reconcile
     def reconcile(self) -> dict:
         try:
+            if hasattr(self.speaker, "sync"):
+                self.speaker.sync()          # sessions and policies first (e.g. after FRR restarted)
             rib = self.speaker.routes()
         except SpeakerError as e:
             self.last_reconcile = {"at": self.clock().isoformat(), "ok": False, "error": str(e)}
@@ -452,9 +478,16 @@ class Controller:
             rib = len(self.speaker.routes())
         except SpeakerError:
             rib = None
+        peers = None
+        if hasattr(self.speaker, "peer_status"):
+            try:
+                peers = self.speaker.peer_status()
+            except SpeakerError as e:
+                peers = {"error": str(e)}
         try:
             self.rds.set(KEY_STATUS, json.dumps({
-                "ts": int(time.time()), "mode": "simulation", "speaker": self.speaker.name, "leader": self.leader,
+                "ts": int(time.time()), "mode": "simulation" if self.speaker.name == "simulated" else "staging",
+                "speaker": self.speaker.name, "leader": self.leader, "peers": peers,
                 "speaker_routes": rib, "last_reconcile": self.last_reconcile}), ex=30)
         except redis.RedisError:
             pass
@@ -463,7 +496,8 @@ class Controller:
         stop = threading.Event()
         signal.signal(signal.SIGTERM, lambda *_: stop.set())
         signal.signal(signal.SIGINT, lambda *_: stop.set())
-        log.info("mitigation controller started in SIMULATION mode: nothing is announced to any router or provider")
+        log.info("mitigation controller started; BGP speaker follows the bgp_speaker setting "
+                 "(simulated, or FRR to staging peers only in this release)")
         while not stop.is_set():
             if not self.leader:
                 try:

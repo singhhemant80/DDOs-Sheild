@@ -8,13 +8,22 @@
 | 4 | Detection engine, baselines, incident management UI | Lab scenarios: UDP/SYN flood-like patterns detected; benign spike not escalated | **Done** (results in docs/detection.md) |
 | 5 | MikroTik read-only integration | Discovery, BGP state, routes, counters from CCR2004 lab unit | **Done against the RouterOS protocol simulator**; CCR2004/CCR2116 hardware check pending (docs/mikrotik.md) |
 | 6 | RTBH controller in simulation mode | Full workflow with dry-run plans, approvals, idempotency, restart reconciliation | **Done** (docs/mitigation.md) |
-| 7 | Staging BGP with FRR, route filters, approval gates | Lab router accepts only authorised /32s; unauthorised and malformed requests rejected | Next |
-| 8 | Controlled live mitigation, rollback, verification | Acceptance tests prove unrelated prefixes unaffected | |
+| 7 | Staging BGP with FRR, route filters, approval gates | Lab router accepts only authorised /32s; unauthorised and malformed requests rejected | **Done** with FRR lab routers (docs/bgp.md); MikroTik filter check pending |
+| 8 | Controlled live mitigation, rollback, verification | Acceptance tests prove unrelated prefixes unaffected | Next |
 | 9 | Selective ISP steering, local filtering, scrubbing adapter | | |
 | 10 | Alerting, reporting, hardening, production checklist | | |
 
 > Note: the master specification document was truncated partway through Phase 9; Phase 9's
 > remaining text and any Phase 10 definition should be supplied before that work starts.
+
+## Phase 7 notes
+
+- FRR is configured only with sessions marked staging; production sessions are recorded but
+  ignored until phase 8. The `bgp_speaker` setting decides between the simulated speaker and FRR.
+- Verification checks that each session advertises the prefix with the discard next hop. FRR does
+  not show outgoing communities per neighbour, so communities are guaranteed by the generated
+  route-map and checked on the receiving side in the tests, not read back.
+- IPv6 blackholes go over IPv6 sessions only (no IPv6-over-IPv4 MP-BGP in this release).
 
 ## Phase 6 notes
 

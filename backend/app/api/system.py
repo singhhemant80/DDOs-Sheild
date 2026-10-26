@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from .. import __version__, audit
@@ -158,6 +158,17 @@ def _validate_setting(key: str, value):
                 ipaddress.ip_address(value)
             except ValueError:
                 raise HTTPException(422, "collector_address must be an IP address") from None
+        if key == "bgp_speaker" and value not in ("simulated", "frr"):
+            raise HTTPException(422, "bgp_speaker must be 'simulated' or 'frr'")
+        if key in ("bgp_router_id", "rtbh_discard_nexthop_v4", "rtbh_discard_nexthop_v6") and value:
+            import ipaddress
+            want = 6 if key.endswith("v6") else 4
+            try:
+                ok = ipaddress.ip_address(value).version == want
+            except ValueError:
+                ok = False
+            if not ok:
+                raise HTTPException(422, f"{key} must be an IPv{want} address")
         if key == "internal_blackhole_community" and value:
             from .. import netvalidate as nv
             try:
@@ -195,6 +206,16 @@ def update_setting(key: str, body: SettingUpdate, p: Principal = Depends(require
     if key in _GUARDED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Use /system/emergency-stop or /system/automation")
     _validate_setting(key, body.value)
+    if key == "bgp_speaker" and body.value != get_setting(db, "bgp_speaker", "simulated"):
+        # Switching speakers with routes in flight would strand them on the old one.
+        from ..models import MitigationAction
+        live = db.execute(select(func.count()).select_from(MitigationAction).where(MitigationAction.state.in_(
+            ["proposed", "approved", "executing", "active", "withdrawing", "failed"]))).scalar_one()
+        if live:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                f"{live} mitigation actions are still open; withdraw or finish them before switching speaker")
+        if body.value == "frr" and not p.mfa and get_setting(db, "require_mfa_for_mitigation", False):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Switching to the FRR speaker requires an MFA session")
     return _set(db, p, key, body.value, "setting.update")
 
 

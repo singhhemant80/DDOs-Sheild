@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=exec
 User=shield
 Group=shield
+SupplementaryGroups=frrvty
 WorkingDirectory=/opt/crapplet-shield/backend
 EnvironmentFile=/etc/crapplet-shield/shield.env
 ExecStart=/opt/crapplet-shield/venv/bin/python -m app.mitigation

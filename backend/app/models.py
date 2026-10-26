@@ -396,9 +396,18 @@ class BgpNeighbor(TimestampMixin, Base):
     managed_by_shield: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_state: Mapped[str | None] = mapped_column(String(32))
     last_state_change_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Phase 7 (sessions on Shield's own FRR speaker)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, server_default="staging", default="staging")
+    remote_port: Mapped[int] = mapped_column(Integer, nullable=False, server_default="179", default=179)
+    ebgp_multihop: Mapped[int | None] = mapped_column(SmallInteger)
+    md5_password_enc: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(String(200))
 
     __table_args__ = (
         UniqueConstraint("router_id", "neighbor_address", name="uq_bgp_router_neighbor"),
+        CheckConstraint("environment IN ('staging', 'production')", name="ck_bgp_environment"),
+        CheckConstraint("remote_port BETWEEN 1 AND 65535", name="ck_bgp_port"),
+        CheckConstraint("ebgp_multihop IS NULL OR ebgp_multihop BETWEEN 1 AND 255", name="ck_bgp_multihop"),
         CheckConstraint("local_asn BETWEEN 1 AND 4294967295 AND remote_asn BETWEEN 1 AND 4294967295", name="ck_bgp_asn"),
         # Shield only ever manages its own signalling / RTBH / steering sessions, never transit.
         CheckConstraint("NOT managed_by_shield OR purpose <> 'transit'", name="ck_bgp_no_managed_transit"),
@@ -907,5 +916,9 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "four_eyes_approval": (False, "A mitigation must be approved by someone other than the person who proposed it."),
     "proposal_ttl_minutes": (15, "Proposals not approved within this time expire; the situation has probably changed."),
     "rtbh_flap_cooldown_seconds": (900, "After a blackhole is withdrawn, re-blackholing the same address within this time needs a human (no automatic re-announce)."),
+    "bgp_speaker": ("simulated", "Where blackhole routes are announced: 'simulated' (nothing leaves Shield) or 'frr' (Shield's FRR BGP speaker; staging peers only in this release)."),
+    "bgp_router_id": ("", "BGP router ID of Shield's FRR speaker (an IPv4 address of this server)."),
+    "rtbh_discard_nexthop_v4": ("192.0.2.1", "IPv4 next hop on blackhole routes when the provider policy sets none (a discard address)."),
+    "rtbh_discard_nexthop_v6": ("100::1", "IPv6 next hop on blackhole routes when the provider policy sets none (RFC 6666 discard prefix)."),
     "rtbh_default_duration_minutes": (60, "How long a manual blackhole lasts before it is reviewed for withdrawal (extended while the attack continues)."),
 }

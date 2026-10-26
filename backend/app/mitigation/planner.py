@@ -79,6 +79,47 @@ def _infrastructure_addresses(db: Session) -> dict[str, str]:
     return out
 
 
+def _session_states() -> dict[str, str]:
+    """Session states the controller last reported from FRR (address -> state)."""
+    try:
+        import json
+        st = json.loads(tm.rds().get("shield:mitigator:status") or "null") or {}
+    except Exception:
+        return {}
+    peers = st.get("peers")
+    return {p["address"]: p.get("state") or "?" for p in peers} if isinstance(peers, list) else {}
+
+
+def _speaker_checks(db: Session, routes: list[dict], checks: list) -> None:
+    from ..models import BgpPurpose
+    states = _session_states()
+    for r in routes:
+        q = select(BgpNeighbor).where(BgpNeighbor.router_id.is_(None), BgpNeighbor.managed_by_shield,
+                                      BgpNeighbor.enabled)
+        if r["upstream_id"] is not None:
+            q = q.where(BgpNeighbor.purpose == BgpPurpose.RTBH_UPSTREAM, BgpNeighbor.upstream_id == r["upstream_id"])
+            who = r["upstream"]
+        else:
+            q = q.where(BgpNeighbor.purpose == BgpPurpose.RTBH_SIGNAL)
+            who = "your edge routers"
+        sessions = db.execute(q).scalars().all()
+        staging = [n for n in sessions if n.environment == "staging"]
+        if not staging:
+            _check(checks, "block", f"session_{r['peer']}",
+                   f"Shield has no staging BGP session to {who}." + (
+                       " Its sessions are marked production; production announcements start in phase 8."
+                       if sessions else " Add one under BGP sessions."))
+            continue
+        down = [f"{n.neighbor_address} ({states.get(str(n.neighbor_address), 'unknown')})" for n in staging
+                if states.get(str(n.neighbor_address)) != "Established"]
+        if down:
+            _check(checks, "warn", f"session_{r['peer']}",
+                   f"Session to {who} not established: {', '.join(down)}. The announcement fails unless it comes up.")
+        else:
+            _check(checks, "ok", f"session_{r['peer']}",
+                   f"Announced by Shield's BGP speaker over {len(staging)} staging session(s) to {who}.")
+
+
 def _live_load(net) -> dict:
     snap = tm.live_snapshot()
     if not snap.get("available"):
@@ -216,6 +257,11 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
                    "Internal blackholing drops traffic at your edge after it has crossed the upstream links. "
                    "It does not relieve a saturated upstream link; use upstream blackholing for that.")
 
+    # --- the BGP speaker ---------------------------------------------------------------------
+    speaker = get_setting(db, "bgp_speaker", "simulated")
+    if speaker == "frr" and routes:
+        _speaker_checks(db, routes, checks)
+
     # --- limits and conflicts ----------------------------------------------------------------
     live_q = select(func.count()).select_from(RtbhRoute).where(RtbhRoute.status.in_(LIVE_ROUTE_STATES))
     if exclude:
@@ -257,7 +303,8 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
     blocked = any(c["level"] == "block" for c in checks)
     return Plan(
         target=target, strategy=req.strategy, blocked=blocked, routes=routes, checks=checks,
-        duration_seconds=duration, protected_prefix_id=pp.id if pp else None, simulation=True,
+        duration_seconds=duration, protected_prefix_id=pp.id if pp else None,
+        simulation=speaker != "frr", speaker=speaker,
         impact={"statements": impact, "addresses": net.num_addresses, "live": _live_load(net),
                 "customer": el.customer},
     )

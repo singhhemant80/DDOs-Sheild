@@ -120,7 +120,7 @@ export function SettingsPage() {
               ? <p>Automatic mitigation is <strong>on</strong>. Policies marked automatic can act without approval.</p>
               : <p>Automatic mitigation is <strong>off</strong>. Every action needs an operator's approval.</p>}
             {get("rtbh_emergency_disable") === true && <p className="mt-1 text-warn">New blackhole announcements are blocked by an emergency stop.</p>}
-            <p className="mt-1 text-ink-3">Automatic policies arrive with the mitigation engine in phase 6. The switch is recorded now.</p>
+            <p className="mt-1 text-ink-3">Only mitigation policies set to act without approval are affected. See Mitigation center, Policies.</p>
           </div>
           {can("automation_enable") && (get("automation_enabled")
             ? <Button onClick={() => automation(false)}>Turn off</Button>
@@ -145,7 +145,19 @@ function SettingValue({ s, editable, onSave }: { s: Setting; editable: boolean; 
   if (typeof s.value === "boolean") {
     return <Check label={s.value ? "On" : "Off"} checked={s.value} disabled={!editable} onChange={onSave} />;
   }
-  if (!editable) return <span>{String(s.value)}</span>;
+  if (!editable) return <span>{String(s.value) || <span className="text-ink-3">not set</span>}</span>;
+  if (s.key === "bgp_speaker") {
+    return <Select aria-label={s.key} value={String(s.value)} onChange={onSave}
+      options={[["simulated", "Simulated (nothing leaves Shield)"], ["frr", "FRR (staging sessions only)"]]} />;
+  }
+  if (typeof s.value === "string") {
+    return (
+      <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); onSave(v.trim()); }}>
+        <Input aria-label={s.key} value={v} onChange={(e) => setV(e.target.value)} className="w-40" />
+        {v !== String(s.value) && <Button>Save</Button>}
+      </form>
+    );
+  }
   return (
     <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); onSave(Number(v)); }}>
       <Input aria-label={s.key} inputMode="numeric" value={v} onChange={(e) => setV(e.target.value.replace(/\D/g, ""))} className="w-24" />
