@@ -26,9 +26,10 @@ from app.models import ActionState, MitigationAction, Role
 
 BGPD = "/usr/lib/frr/bgpd"
 R = redis.Redis.from_url(os.environ["SHIELD_REDIS_URL"], decode_responses=True)
-pytestmark = pytest.mark.skipif(
-    not (os.path.exists(BGPD) and shutil.which("vtysh") and os.geteuid() == 0),
-    reason="needs FRR (bgpd, vtysh) and root")
+_HAVE_FRR = os.path.exists(BGPD) and shutil.which("vtysh") and os.geteuid() == 0
+if os.environ.get("SHIELD_REQUIRE_FRR") and not _HAVE_FRR:   # CI: a skip must not look like a pass
+    raise RuntimeError("SHIELD_REQUIRE_FRR is set but FRR (bgpd, vtysh) or root is missing")
+pytestmark = pytest.mark.skipif(not _HAVE_FRR, reason="needs FRR (bgpd, vtysh) and root")
 
 SHIELD, LAB, UPSTREAM = "127.0.0.41", "127.0.0.40", "127.0.0.42"
 SHIELD_AS, LAB_AS, UP_AS = 65010, 65020, 174

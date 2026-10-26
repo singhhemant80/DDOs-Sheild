@@ -48,6 +48,7 @@ jobs:
         env:
           SHIELD_TEST_DATABASE_URL: postgresql+psycopg://postgres:test@127.0.0.1/shield_test
           SHIELD_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+          SHIELD_REQUIRE_FRR: "1"
 
   installer:
     runs-on: ubuntu-24.04
