@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Plus } from "lucide-react";
+import { Pencil, Plus } from "lucide-react";
 import { accessToken, api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useApi } from "../lib/hooks";
@@ -210,16 +210,19 @@ export function Routers() {
   const routers = useApi<Router[]>("/routers");
   const ups = useApi<Upstream[]>("/upstreams");
   const [policyFor, setPolicyFor] = useState<Upstream | null>(null);
+  const [editUp, setEditUp] = useState<Upstream | "new" | null>(null);
   const rname = (id: number | null) => routers.data?.find((r) => r.id === id)?.name ?? "–";
   return (
     <div className="space-y-5">
       <PageHeader title="Routers & upstreams"
-        description="Edge routers and transit providers. Shield only reads from routers: nothing on a router is changed until phase 8, and then only with approval." />
+        description="Edge routers and transit providers. Shield only reads from routers; it never changes their configuration. Blackhole routes are sent over BGP, and only with approval." />
       <ErrorLine error={ups.error} />
       <RouterList />
-      <Section title="Upstream providers" flush>
-        <Table rows={ups.data ?? []} rowKey={(r) => String(r.id)} empty="No upstreams configured."
-          onRow={can("config_network") ? setPolicyFor : undefined}
+      <Section title="Upstream providers" flush
+        aside={can("config_network") && <Button onClick={() => setEditUp("new")}><Plus size={16} /> Add upstream</Button>}>
+        <Table rows={ups.data ?? []} rowKey={(r) => String(r.id)}
+          empty={can("config_network") ? "No upstreams yet. Add each transit or peering provider your edge router connects to." : "No upstreams configured."}
+          onRow={can("config_network") ? setEditUp : undefined}
           cols={[
             { key: "n", header: "Provider", render: (r) => <><div className="font-medium">{r.name} {r.ddos_protected && <Badge tone="signal">DDoS-protected</Badge>}</div><div className="text-xs text-ink-3">AS{r.asn}</div></> },
             { key: "l", header: "Link", render: (r) => <>{rname(r.router_id)} {r.interface_name}<div className="text-xs text-ink-3">{r.capacity_mbps ? `${r.capacity_mbps / 1000} Gb/s, alarm at ${r.saturation_threshold_pct}%` : "capacity not set"}</div></> },
@@ -227,10 +230,90 @@ export function Routers() {
                 : r.rtbh_policy.enabled ? <Badge tone="ok">Enabled: {r.rtbh_policy.communities.join(", ")}</Badge>
                 : r.rtbh_policy.verified_at ? <Badge tone="signal">Verified, not enabled</Badge>
                 : <Badge tone="warn">Needs verification</Badge> },
+            { key: "a", header: "", align: "right" as const, render: (r) => can("config_network") && (
+              <div className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                <Button variant="quiet" onClick={() => setEditUp(r)}><Pencil size={15} /> Edit</Button>
+                <Button onClick={() => setPolicyFor(r)}>Blackhole policy</Button>
+              </div>) },
           ]} />
       </Section>
       {policyFor && <PolicyDialog up={policyFor} onClose={() => setPolicyFor(null)} onSaved={ups.reload} />}
+      {editUp && <UpstreamDialog up={editUp === "new" ? null : editUp} routers={routers.data ?? []} existing={ups.data ?? []}
+        onClose={() => setEditUp(null)} onSaved={ups.reload} />}
     </div>
+  );
+}
+
+type RouterPeer = { router_id: number | null; router: string | null; name: string; remote_address: string; remote_as: number | null;
+  shield?: boolean; established?: boolean };
+
+function UpstreamDialog({ up, routers, existing, onClose, onSaved }:
+  { up: Upstream | null; routers: Router[]; existing: Upstream[]; onClose: () => void; onSaved: () => void }) {
+  const [f, setF] = useState({
+    name: up?.name ?? "", asn: up ? String(up.asn) : "", description: up?.description ?? "",
+    router_id: up?.router_id ? String(up.router_id) : routers.length === 1 ? String(routers[0].id) : "",
+    interface_name: up?.interface_name ?? "", capacity_gbps: up?.capacity_mbps ? String(up.capacity_mbps / 1000) : "",
+    saturation_threshold_pct: String(up?.saturation_threshold_pct ?? 85), ddos_protected: up?.ddos_protected ?? false, enabled: up?.enabled ?? true,
+  });
+  const [err, setErr] = useState<string | null>(null);
+  const [sure, setSure] = useState(false);
+  const set = (k: string, v: unknown) => setF((x) => ({ ...x, [k]: v }));
+  const sessions = useApi<RouterPeer[]>("/bgp/sessions");
+  const st = useApi<{ interfaces?: { name: string; comment?: string | null; type?: string }[] }>(f.router_id ? `/routers/${f.router_id}/state` : null);
+  const known = new Set(existing.map((u) => u.asn));
+  const suggestions = (sessions.data ?? []).filter((x) => !x.shield && x.remote_as && !known.has(x.remote_as)
+    && (!f.router_id || String(x.router_id) === f.router_id));
+  const ifaces = (st.data?.interfaces ?? []).filter((i) => !/^(lo|bridge)/.test(i.name));
+  const save = async () => {
+    setErr(null);
+    const cap = f.capacity_gbps.trim() ? Math.round(Number(f.capacity_gbps) * 1000) : null;
+    const common = { description: f.description.trim() || null, router_id: f.router_id ? Number(f.router_id) : null,
+      interface_name: f.interface_name.trim() || null, capacity_mbps: cap, saturation_threshold_pct: Number(f.saturation_threshold_pct),
+      ddos_protected: f.ddos_protected, enabled: f.enabled };
+    try {
+      if (up) await api(`/upstreams/${up.id}`, { method: "PATCH", body: common });
+      else await api("/upstreams", { method: "POST", body: { name: f.name.trim(), asn: Number(f.asn), ...common } });
+      onSaved(); onClose();
+    } catch (e: any) { setErr(e.message); }
+  };
+  const del = async () => {
+    if (!sure) { setSure(true); return; }
+    try { await api(`/upstreams/${up!.id}`, { method: "DELETE" }); onSaved(); onClose(); } catch (e: any) { setErr(e.message); }
+  };
+  return (
+    <Dialog open title={up ? `Edit ${up.name}` : "Add an upstream provider"} onClose={onClose}
+      footer={<>{up && <Button variant="danger" onClick={del}>{sure ? "Really delete" : "Delete"}</Button>}
+        <Button variant="quiet" onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save}>Save</Button></>}>
+      <p className="text-sm text-ink-2">An upstream is a transit or peering provider your edge router connects to. Shield uses it to show
+        traffic and link load per provider and, once you add its blackhole policy, to ask that provider to drop attack traffic.
+        Nothing is changed on your router.</p>
+      {!up && suggestions.length > 0 && (
+        <Field label="Fill in from a BGP session on your router" hint="Sessions Shield read from the router that are not recorded as upstreams yet">
+          <Select value="" onChange={(v) => {
+            const x = suggestions[Number(v)];
+            if (x) setF((o) => ({ ...o, name: o.name || x.name.replace(/[^A-Za-z0-9 _.-]/g, "-").slice(0, 64), asn: String(x.remote_as),
+              router_id: x.router_id ? String(x.router_id) : o.router_id, description: o.description || `BGP peer ${x.remote_address}` }));
+          }} options={[["", "Choose a session…"], ...suggestions.map((x, i) => [String(i),
+            `${x.name}: ${x.remote_address}, AS${x.remote_as}${x.established ? "" : " (down)"}`] as [string, string])]} />
+        </Field>)}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Name" hint="Letters, digits, space . _ -"><Input value={f.name} disabled={!!up} onChange={(e) => set("name", e.target.value)} placeholder="Cyfuture" /></Field>
+        <Field label="Provider's AS number"><Input inputMode="numeric" value={f.asn} disabled={!!up} onChange={(e) => set("asn", e.target.value)} placeholder="e.g. 55470" /></Field>
+        <Field label="Edge router"><Select value={f.router_id} onChange={(v) => set("router_id", v)}
+          options={[["", "Not linked"], ...routers.map((r) => [String(r.id), r.name] as [string, string])]} /></Field>
+        <Field label="Interface to this provider" hint="The port or VLAN the provider is on (e.g. sfp-sfpplus12)">
+          <Input list="up-ifaces" value={f.interface_name} onChange={(e) => set("interface_name", e.target.value)} />
+          <datalist id="up-ifaces">{ifaces.map((i) => <option key={i.name} value={i.name}>{i.comment ?? ""}</option>)}</datalist>
+        </Field>
+        <Field label="Link capacity (Gb/s)" hint="Committed or port speed; used for link load"><Input inputMode="decimal" value={f.capacity_gbps} onChange={(e) => set("capacity_gbps", e.target.value)} placeholder="10" /></Field>
+        <Field label="Saturation alarm at (%)"><Input inputMode="numeric" value={f.saturation_threshold_pct} onChange={(e) => set("saturation_threshold_pct", e.target.value)} /></Field>
+        <div className="sm:col-span-2"><Field label="Notes"><Input value={f.description} onChange={(e) => set("description", e.target.value)} /></Field></div>
+        <Check label="Provider offers DDoS protection on this link" checked={f.ddos_protected} onChange={(v) => set("ddos_protected", v)} />
+        <Check label="Enabled" checked={f.enabled} onChange={(v) => set("enabled", v)} />
+      </div>
+      {sure && <Notice tone="warn">Deleting removes the provider and its blackhole policy. Click again to confirm.</Notice>}
+      <ErrorLine error={err} />
+    </Dialog>
   );
 }
 

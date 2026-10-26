@@ -10,7 +10,7 @@ from .. import audit
 from ..changes import record_change
 from ..db import get_db
 from ..deps import Principal, require
-from ..models import Router, UpstreamProvider, UpstreamRtbhPolicy
+from ..models import BgpNeighbor, MitigationAction, Router, UpstreamProvider, UpstreamRtbhPolicy
 from ..rbac import Perm
 from ..schemas import RtbhPolicyIn, RtbhPolicyOut, UpstreamCreate, UpstreamOut, UpstreamUpdate
 
@@ -69,6 +69,11 @@ def update_upstream(upstream_id: int, body: UpstreamUpdate, p: Principal = Depen
 def delete_upstream(upstream_id: int, p: Principal = Depends(require(Perm.CONFIG_NETWORK)),
                     db: Session = Depends(get_db)):
     u = _get(db, upstream_id)
+    if db.execute(select(MitigationAction.id).where(MitigationAction.upstream_id == upstream_id, MitigationAction.state.in_(
+            ["proposed", "approved", "executing", "active", "withdrawing", "failed"]))).first():
+        raise HTTPException(status.HTTP_409_CONFLICT, "This provider has open blackholes; withdraw them first")
+    if db.execute(select(BgpNeighbor.id).where(BgpNeighbor.upstream_id == upstream_id)).first():
+        raise HTTPException(status.HTTP_409_CONFLICT, "BGP sessions refer to this provider; delete them first (BGP sessions)")
     before = audit.snapshot(u)
     db.delete(u)
     record_change(db, p.actor, "upstream.delete", "upstream", None, entity_id=upstream_id, before=before)
