@@ -8,6 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .. import __version__, audit
+from .. import telemetry as tm
 from ..changes import get_setting
 from ..db import get_db
 from ..deps import Principal, require
@@ -42,12 +43,24 @@ def health_details(_: Principal = Depends(require(Perm.VIEW)), db: Session = Dep
         "components": {
             "api": "up",
             "database": "up",
-            "collector": "not_installed",   # Phase 3
-            "detector": "not_installed",    # Phase 4
+            "redis": "up" if tm.redis_ok() else "down",
+            "clickhouse": "up" if tm.clickhouse_ok() else "down",
+            "collector": _collector_state(),
+            "detector": "not_installed",          # Phase 4
             "mikrotik_adapter": "not_installed",  # Phase 5
-            "mitigator": "not_installed",   # Phase 6
+            "mitigator": "not_installed",         # Phase 6
         },
     }
+
+
+def _collector_state() -> str:
+    st = tm.collector_status()
+    if not st.get("running"):
+        return "down"
+    exporters = st.get("exporters", [])
+    if not exporters or all(e.get("stale") for e in exporters):
+        return "degraded"  # running but receiving nothing
+    return "up"
 
 
 # ---------------------------------------------------------------- audit

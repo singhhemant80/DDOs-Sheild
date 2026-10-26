@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 
 from fastapi import FastAPI, Request, status
@@ -8,8 +10,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from . import __version__
-from .api import auth, bgp, customers, devices, prefixes, system, upstreams, users
+from . import telemetry
+from .api import auth, bgp, customers, devices, prefixes, system, traffic, upstreams, users
 from .config import get_settings
+from .db import session_factory
 
 log = logging.getLogger("shield.api")
 
@@ -21,14 +25,40 @@ Management API for **Crapplet DDoS Shield**.
 All endpoints except `GET /health` and `POST /auth/login` / `POST /auth/refresh` require a
 bearer access token. Every state-changing call is recorded in the hash-chained audit log.
 
-Phase 2 scope: identity, RBAC, inventory (prefixes, routers, upstreams, BGP neighbours,
-customer IPs), settings, audit. No endpoint in this version contacts a router or BGP peer.
+Scope (v0.3): identity, RBAC, inventory, settings, audit, and live/historical traffic from the
+flow collector (`/traffic/*`, WebSocket `/ws/traffic`). No endpoint in this version contacts a
+router or a BGP peer.
 """
+
+
+def _republish_prefixes() -> None:
+    db = session_factory()()
+    try:
+        telemetry.publish_prefixes(db)
+    finally:
+        db.close()
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Keep the collector's prefix list fresh even if a publish was missed (e.g. Redis restart)."""
+    async def loop():
+        while True:
+            try:
+                await asyncio.to_thread(_republish_prefixes)
+            except Exception:  # never let telemetry take the API down
+                log.exception("prefix republish failed")
+            await asyncio.sleep(60)
+
+    task = asyncio.create_task(loop())
+    yield
+    task.cancel()
 
 
 def create_app() -> FastAPI:
     s = get_settings()
     app = FastAPI(
+        lifespan=lifespan,
         title="Crapplet DDoS Shield API",
         version=__version__,
         description=DESCRIPTION,
@@ -74,7 +104,7 @@ def create_app() -> FastAPI:
         log.exception("database error")
         return JSONResponse({"detail": "Database error"}, status_code=503)
 
-    for module in (system, auth, users, prefixes, devices, upstreams, bgp, customers):
+    for module in (system, auth, users, prefixes, devices, upstreams, bgp, customers, traffic):
         app.include_router(module.router, prefix=API_PREFIX)
     return app
 

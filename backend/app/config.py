@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     expose_docs: bool = False
     cors_origins: list[str] = []
 
+    # Live telemetry (Phase 3). Both are optional: the API degrades to "unavailable" without them.
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    clickhouse_url: str = "http://127.0.0.1:8123"
+    clickhouse_database: str = Field("shield", pattern=r"^[A-Za-z0-9_]+$")
+    clickhouse_user: str = "default"
+    clickhouse_password: str = ""
+    # Snapshots older than this are reported as unavailable rather than shown as current.
+    live_stale_seconds: int = 5
+    iface_stale_seconds: int = 60
+
     @field_validator("secret_key")
     @classmethod
     def _no_placeholder(cls, v: str) -> str:

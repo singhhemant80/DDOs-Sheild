@@ -21,6 +21,10 @@ os.environ["SHIELD_DATABASE_URL"] = TEST_DB
 os.environ["SHIELD_ENV"] = "test"
 os.environ["SHIELD_SECRET_KEY"] = secrets.token_urlsafe(48)
 os.environ["SHIELD_CREDENTIAL_KEY"] = Fernet.generate_key().decode()
+# Optional backends for traffic tests. Redis DB 15 is flushed between tests - use a disposable one.
+os.environ["SHIELD_REDIS_URL"] = os.environ.get("SHIELD_TEST_REDIS_URL", "redis://127.0.0.1:6379/15")
+os.environ["SHIELD_CLICKHOUSE_URL"] = os.environ.get("SHIELD_TEST_CLICKHOUSE_URL", "http://127.0.0.1:1")
+os.environ["SHIELD_CLICKHOUSE_DATABASE"] = "shield_test"
 
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402

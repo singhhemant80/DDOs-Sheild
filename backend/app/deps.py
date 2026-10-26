@@ -64,13 +64,20 @@ def get_principal(
 ) -> Principal:
     if creds is None or creds.scheme.lower() != "bearer":
         raise _unauthorized()
+    user, sess = authenticate_token(db, creds.credentials)
+    request.state.user_id = str(user.id)
+    return Principal(user, sess.id, bool(sess.mfa_verified), client_ip(request),
+                     request.headers.get("user-agent"))
+
+
+def authenticate_token(db: Session, token: str) -> tuple[User, AuthSession]:
+    """Validate an access token against its live session. Shared by HTTP and WebSocket auth."""
     try:
-        payload = decode_access_token(creds.credentials)
+        payload = decode_access_token(token)
         user_id = uuid.UUID(payload["sub"])
         session_id = uuid.UUID(payload["sid"])
     except (jwt.PyJWTError, ValueError, KeyError):
         raise _unauthorized("Invalid or expired token") from None
-
     sess = db.get(AuthSession, session_id)
     now = datetime.now(UTC)
     if sess is None or sess.user_id != user_id or sess.revoked_at is not None or sess.expires_at <= now:
@@ -79,9 +86,7 @@ def get_principal(
     if user is None or not user.is_active:
         raise _unauthorized("Account disabled")
     # Role in the token is informational; the DB role is authoritative so demotions apply immediately.
-    request.state.user_id = str(user.id)
-    return Principal(user, session_id, bool(sess.mfa_verified), client_ip(request),
-                     request.headers.get("user-agent"))
+    return user, sess
 
 
 def require(perm: Perm, *, mfa: bool = False):

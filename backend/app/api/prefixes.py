@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import CIDR
 from sqlalchemy.orm import Session
 
 from .. import audit
+from .. import telemetry
 from .. import netvalidate as nv
 from ..changes import record_change
 from ..db import get_db
@@ -104,6 +105,7 @@ def create_prefix(body: PrefixCreate, p: Principal = Depends(require(Perm.CONFIG
         pp.authorized_at = datetime.now(UTC)
     db.add(pp)
     record_change(db, p.actor, "prefix.create", "protected_prefix", pp)
+    telemetry.publish_prefixes(db)
     return pp
 
 
@@ -131,6 +133,7 @@ def update_prefix(prefix_id: int, body: PrefixUpdate, p: Principal = Depends(req
             pp.authorized_by_id = p.user.id
             pp.authorized_at = datetime.now(UTC)
     record_change(db, p.actor, "prefix.update", "protected_prefix", pp, before=before)
+    telemetry.publish_prefixes(db)
     return pp
 
 
@@ -147,3 +150,4 @@ def delete_prefix(prefix_id: int, p: Principal = Depends(require(Perm.CONFIG_NET
     before = audit.snapshot(pp)
     db.delete(pp)
     record_change(db, p.actor, "prefix.delete", "protected_prefix", None, entity_id=prefix_id, before=before)
+    telemetry.publish_prefixes(db)
