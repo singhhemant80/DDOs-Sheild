@@ -95,7 +95,9 @@ CREATE TABLE IF NOT EXISTS shield.dst_1m
 (
     ts       DateTime('UTC'),
     dst      String,
-    prefix   LowCardinality(String),
+    -- The covering protected prefix of `dst`. Declared as an aggregate (any) because it is not part of
+    -- the sorting key: ClickHouse 25+/26 refuses plain columns there in AggregatingMergeTree.
+    prefix   SimpleAggregateFunction(any, LowCardinality(String)),
     seconds  AggregateFunction(count),
     pps_avg  AggregateFunction(avg, Float64),
     pps_max  AggregateFunction(max, Float64),
