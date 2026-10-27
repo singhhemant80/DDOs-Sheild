@@ -27,6 +27,8 @@ def request_fingerprint(req: PlanRequest) -> str:
             "incident": req.incident_id, "duration": req.duration_seconds}
     if req.router_ids is not None or req.filters is not None:
         body |= {"routers": sorted(req.router_ids or []), "filters": req.filters}
+    if req.steering is not None:
+        body |= {"steering": req.steering}
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
 
@@ -79,6 +81,8 @@ def recheck(db: Session, actions: list[MitigationAction], *, automatic: bool = F
                       duration_seconds=(a0.plan or {}).get("duration_seconds"), automatic=automatic,
                       auto_approve=auto_approve, acceptance_peer=(a0.plan or {}).get("acceptance_peer"),
                       exclude_action_ids=[str(a.id) for a in actions])
+    if a0.strategy == Strategy.STEERING:
+        req.steering = [s for a in actions for s in (((a.plan or {}).get("route") or {}).get("steering") or [])]
     if a0.strategy == Strategy.LOCAL_FILTER:
         req.router_ids = [a.router_id for a in actions if a.router_id is not None]
         req.filters = list(((a0.plan or {}).get("route") or {}).get("filters") or [])

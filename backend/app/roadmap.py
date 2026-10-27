@@ -52,10 +52,11 @@ PHASES: list[dict] = [
      "release": "0.9", "in_progress": True,
      "parts": [
          {"title": "Local filtering on MikroTik (firewall raw drop rules)", "status": "done", "release": "0.9"},
-         {"title": "Selective ISP steering (withhold / prepend towards one upstream)", "status": "pending"},
+         {"title": "Selective ISP steering (withhold / prepend / tag towards one upstream)", "status": "done", "release": "0.9.1"},
          {"title": "Scrubbing-centre adapter", "status": "pending"},
      ],
-     "verify": ["Run local filtering against a real CCR2004/CCR2116 (tested on the RouterOS protocol simulator)"],
+     "verify": ["Run local filtering against a real CCR2004/CCR2116 (tested on the RouterOS protocol simulator)",
+                "Check steering on your router: the routing filter syntax and that BGP re-advertises after the rule changes"],
      "blocked": "Designed from the parts of the specification available; its Phase 9 text is incomplete."},
     {"n": 10, "title": "Alerting, reporting and hardening",
      "scope": "Email, Telegram and webhook alerts, reports, hardening, production checklist.",

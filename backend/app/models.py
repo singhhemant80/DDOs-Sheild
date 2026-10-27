@@ -845,6 +845,8 @@ class FilterRule(TimestampMixin, Base):
     action_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("mitigation_actions.id", ondelete="RESTRICT"), nullable=False)
     router_id: Mapped[int | None] = mapped_column(ForeignKey("routers.id", ondelete="SET NULL"))
     comment: Mapped[str] = mapped_column(String(128), nullable=False)
+    # "filter" (firewall raw drop rule) or "steer" (BGP output filter rule towards one upstream)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False, server_default="filter", default="filter")
     match: Mapped[dict] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)   # pending, active, removing, removed, failed
     backend: Mapped[str] = mapped_column(String(16), nullable=False)  # simulated | routeros
@@ -989,6 +991,8 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "rtbh_flap_cooldown_seconds": (900, "After a blackhole is withdrawn, re-blackholing the same address within this time needs a human (no automatic re-announce)."),
     "filter_backend": ("simulated", "Where local filtering rules go: 'simulated' (nothing changes on any router) or 'routeros' (Shield's filter account adds its own drop rules to the router's firewall raw table)."),
     "filter_max_rules": (50, "Hard ceiling on Shield's firewall drop rules across all routers."),
+    "steering_backend": ("simulated", "Where steering rules go: 'simulated' (nothing changes on any router) or 'routeros' (Shield's filter account adds its own rules to the BGP output filter towards an upstream)."),
+    "steering_max_rules": (20, "Hard ceiling on Shield's steering rules across all upstreams."),
     "bgp_production_enabled": (False, "Production BGP sessions are configured and may carry blackholes (each only after its acceptance run passes). Changed only through its own switch."),
     "bgp_speaker": ("simulated", "Where blackhole routes are announced: 'simulated' (nothing leaves Shield) or 'frr' (Shield's FRR BGP speaker: staging sessions, and production sessions once production is switched on)."),
     "bgp_router_id": ("", "BGP router ID of Shield's FRR speaker (an IPv4 address of this server)."),

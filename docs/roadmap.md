@@ -10,7 +10,7 @@
 | 6 | RTBH controller in simulation mode | Full workflow with dry-run plans, approvals, idempotency, restart reconciliation | **Done** (docs/mitigation.md) |
 | 7 | Staging BGP with FRR, route filters, approval gates | Lab router accepts only authorised /32s; unauthorised and malformed requests rejected | **Done** with FRR lab routers (docs/bgp.md); MikroTik filter check pending |
 | 8 | Controlled live mitigation, rollback, verification | Acceptance tests prove unrelated prefixes unaffected | **Done** with FRR lab routers (docs/production.md); first production run is on your network |
-| 9 | Selective ISP steering, local filtering, scrubbing adapter | Each part drops or diverts only attack traffic, verified and reversible | **In progress**: local filtering done (v0.9, docs/local-filtering.md); steering and scrubbing pending |
+| 9 | Selective ISP steering, local filtering, scrubbing adapter | Each part drops or diverts only attack traffic, verified and reversible | **In progress**: local filtering (v0.9.0, docs/local-filtering.md) and steering (v0.9.1, docs/steering.md) done; scrubbing pending |
 | 10 | Alerting, reporting, hardening, production checklist | | Pending |
 
 > Note: the master specification document was truncated partway through Phase 9; Phase 9's
@@ -24,7 +24,10 @@ sidebar), together with the go-live steps still open on your installation.
 - Designed from the available parts of the specification (its Phase 9 text is incomplete).
 - Local filtering is done: Shield-owned drop rules in the router's firewall raw table, through a
   separate write-restricted RouterOS account, simulated by default (`filter_backend`).
-- Still to come in Phase 9: selective upstream steering and a scrubbing-centre adapter.
+- Steering is done: Shield-owned rules in the BGP output filter towards one upstream (withhold,
+  prepend, action communities), never leaving a prefix unannounced, simulated by default
+  (`steering_backend`).
+- Still to come in Phase 9: a scrubbing-centre adapter.
 
 ## Phase 8 notes
 

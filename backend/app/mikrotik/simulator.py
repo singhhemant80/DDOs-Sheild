@@ -94,6 +94,12 @@ def default_state(name: str = "edge-r1", mgmt: str = "10.255.0.1", model: str = 
              "comment": "operator bogon filter", "disabled": "false", "packets": "55", "bytes": "3300"},
         ],
         "/ipv6/firewall/raw": [],
+        "/routing/filter/rule": [
+            {".id": "*1", "chain": "upstream-a-out", "rule": "if (dst in 163.5.191.0/24 && dst-len == 24) { accept; }",
+             "comment": "announce our /24", "disabled": "false"},
+            {".id": "*2", "chain": "upstream-a-out", "rule": "reject;", "comment": "nothing else", "disabled": "false"},
+            {".id": "*3", "chain": "upstream-a-in", "rule": "accept;", "disabled": "false"},
+        ],
         "/user": [
             {".id": "*1", "name": "admin", "group": "full", "address": "", "disabled": "false"},
             {".id": "*2", "name": "shield-ro", "group": "shield-read", "address": "10.255.0.10/32", "disabled": "false"},
@@ -238,7 +244,8 @@ class RouterOSSimulator:
     def _write(self, cmd: str, attrs: dict, user: str | None) -> bytes:
         trap = lambda m: encode_sentence(["!trap", f"=message={m}"]) + encode_sentence(["!done"])  # noqa: E731
         base, _, verb = cmd.rpartition("/")
-        if user not in self.writers or base not in ("/ip/firewall/raw", "/ipv6/firewall/raw") or verb not in ("add", "remove"):
+        if user not in self.writers or base not in ("/ip/firewall/raw", "/ipv6/firewall/raw", "/routing/filter/rule") \
+                or verb not in ("add", "remove"):
             return trap("not enough permissions (9)")
         with self.lock:
             rows = self.state.setdefault(base, [])
@@ -248,8 +255,10 @@ class RouterOSSimulator:
                 return encode_sentence(["!done"]) if len(rows) < n else trap("no such item")
             self._next_id += 1
             rid = f"*{self._next_id:X}"
-            row = {".id": rid, **{k: v for k, v in attrs.items() if k != "place-before"}, "packets": "0", "bytes": "0",
+            row = {".id": rid, **{k: v for k, v in attrs.items() if k != "place-before"},
                    "disabled": attrs.get("disabled", "false").replace("no", "false")}
+            if base != "/routing/filter/rule":
+                row |= {"packets": "0", "bytes": "0"}
             before = attrs.get("place-before")
             idx = next((i for i, r in enumerate(rows) if r.get(".id") == before), None) if before else None
             if before and idx is None:

@@ -4,7 +4,9 @@
 #   a user group "shield-filter" (read,write,api) and a user for Shield, allowed only from the
 #   Shield server's address. Shield uses this account only to add and remove its OWN drop rules in
 #   /ip firewall raw (chain "shield-filter", comments starting "shield:"), plus one jump rule at
-#   the top of raw prerouting (comment "shield:jump"). Shield's own client refuses every other change.
+#   the top of raw prerouting (comment "shield:jump"); and, for steering, its own rules in
+#   /routing filter rule chains "shield-steer-<n>" plus one jump at the top of an upstream's BGP
+#   output chain (comment "shield:steer-jump:<n>"). Shield's own client refuses every other change.
 #
 # Be aware: RouterOS cannot limit an account to the firewall. A "write" account can change any
 # configuration, so keep this password safe, allow it from the Shield server only, and keep it
@@ -35,5 +37,6 @@
 # ---- Undo (copy into the terminal) ------------------------------------------------------------
 # /ip firewall raw remove [find where comment~"^shield:"]
 # /ipv6 firewall raw remove [find where comment~"^shield:"]
+# /routing filter rule remove [find where comment~"^shield:"]
 # /user remove [find name="shield-fw"]
 # /user group remove [find name="shield-filter"]

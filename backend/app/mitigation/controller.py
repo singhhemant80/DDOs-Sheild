@@ -46,6 +46,7 @@ from ..models import (
 from . import service
 from .acceptance import AcceptanceRunner, run_interlock
 from . import filtering as flt
+from . import steering as stg
 from .planner import AVAILABLE_STRATEGIES, PlanRequest, build_plan
 from .speaker import Route, SimulatedSpeaker, Speaker, SpeakerError, SpeakerRefused, make_speaker
 from .state import record, transition
@@ -68,10 +69,23 @@ def _route_of(a: MitigationAction) -> Route:
                  no_export=bool(r.get("no_export", True)), action_id=str(a.id))
 
 
+class _Kind:
+    """How one family of router rules is described, compared and stored."""
+
+    def __init__(self, name: str, strategy, plan_key: str, spec, same):
+        self.name, self.strategy, self.plan_key, self.spec, self.same = name, strategy, plan_key, spec, same
+
+
+KINDS = {
+    Strategy.LOCAL_FILTER: _Kind("filter", Strategy.LOCAL_FILTER, "filters", flt.Match.from_dict, flt.same_rule),
+    Strategy.STEERING: _Kind("steer", Strategy.STEERING, "steering", stg.Steer.from_dict, stg.same_rule),
+}
+
+
 class Controller:
     def __init__(self, rds: redis.Redis | None = None, sessions: Callable[[], Session] | None = None,
                  speaker: Speaker | None = None, clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-                 filters: "flt.FilterBackend | None" = None):
+                 filters: "flt.FilterBackend | None" = None, steers: "flt.FilterBackend | None" = None):
         s = get_settings()
         self.rds = rds or redis.Redis.from_url(s.redis_url, socket_timeout=2, socket_connect_timeout=2,
                                                decode_responses=True)
@@ -89,7 +103,10 @@ class Controller:
         self.last_interlock: list[dict] = []
         self._fixed_filters = filters is not None
         self.filters: flt.FilterBackend = filters or flt.SimulatedFilters(self.rds)
+        self._fixed_steers = steers is not None
+        self.steers: flt.FilterBackend = steers or stg.SimulatedSteering(self.rds)
         self.last_filter_reconcile: dict = {}
+        self.last_steer_reconcile: dict = {}
 
     # ------------------------------------------------------------ leadership
     def acquire_lock(self) -> bool:
@@ -123,16 +140,20 @@ class Controller:
         return True
 
     def select_filters(self) -> bool:
-        """Follow the filter_backend setting. Returns True if it changed."""
-        if self._fixed_filters:
-            return False
+        """Follow the filter_backend and steering_backend settings. Returns True if one changed."""
+        changed = False
         with self.sessions() as db:
-            want = get_setting(db, "filter_backend", "simulated")
-        if want == self.filters.name:
-            return False
-        log.warning("switching filter backend from %s to %s", self.filters.name, want)
-        self.filters = flt.make_backend(want, self.rds)
-        return True
+            want_f = get_setting(db, "filter_backend", "simulated")
+            want_s = get_setting(db, "steering_backend", "simulated")
+        if not self._fixed_filters and want_f != self.filters.name:
+            log.warning("switching filter backend from %s to %s", self.filters.name, want_f)
+            self.filters = flt.make_backend(want_f, self.rds)
+            changed = True
+        if not self._fixed_steers and want_s != self.steers.name:
+            log.warning("switching steering backend from %s to %s", self.steers.name, want_s)
+            self.steers = stg.make_backend(want_s, self.rds)
+            changed = True
+        return changed
 
     def tick(self, *, force_reconcile: bool = False) -> None:
         mono = time.monotonic()
@@ -228,7 +249,8 @@ class Controller:
                                   duration_seconds=pol.mitigation_duration_seconds, automatic=True,
                                   auto_approve=not pol.requires_approval)
                 plan = build_plan(db, req, now)
-                if pol.max_scope_prefix_len and int(plan["target"].split("/")[1]) < pol.max_scope_prefix_len:
+                if strategy != Strategy.STEERING.value and pol.max_scope_prefix_len and \
+                        int(plan["target"].split("/")[1]) < pol.max_scope_prefix_len:
                     plan["checks"].append({"level": "block", "code": "policy_scope",
                                            "message": f"Policy {pol.name} allows /{pol.max_scope_prefix_len} or longer."})
                     plan["blocked"] = True
@@ -280,10 +302,10 @@ class Controller:
                 n += self.execute_one(aid)
         return n
 
-    def _is_filter(self, aid: uuid.UUID) -> bool:
+    def _rule_kind(self, aid: uuid.UUID) -> "_Kind | None":
         with self.sessions() as db:
             a = db.get(MitigationAction, aid)
-            return a is not None and a.strategy == Strategy.LOCAL_FILTER
+            return KINDS.get(a.strategy) if a is not None else None
 
     def _start(self, db: Session, a: MitigationAction) -> bool:
         """APPROVED -> EXECUTING after re-checking the plan. False if it was blocked (now REJECTED)."""
@@ -299,8 +321,9 @@ class Controller:
         return True
 
     def execute_one(self, aid: uuid.UUID) -> int:
-        if self._is_filter(aid):
-            return self._execute_filter(aid)
+        kind = self._rule_kind(aid)
+        if kind is not None:
+            return self._execute_rules(aid, kind)
         with self.sessions() as db, db.begin():
             a = self._lock(db, aid, S.APPROVED, S.EXECUTING)
             if a is None:
@@ -408,8 +431,9 @@ class Controller:
         return n
 
     def _remove(self, aid: uuid.UUID, frm: S, to: S, kind: str) -> int:
-        if self._is_filter(aid):
-            return self._remove_filter(aid, frm, to, kind)
+        rk = self._rule_kind(aid)
+        if rk is not None:
+            return self._remove_rules(aid, frm, to, kind, rk)
         with self.sessions() as db:
             a = db.get(MitigationAction, aid)
             if a is None or a.state != frm:
@@ -473,7 +497,10 @@ class Controller:
                 n += 1
         return n
 
-    # ------------------------------------------------------------ local filtering (Phase 9)
+    # ------------------------------------------------------------ rules on routers (Phase 9)
+    # Local filtering (firewall raw drop rules) and steering (BGP output filter rules) work the same
+    # way: a ledger row per rule (filter_rules), rules identified on the router by a shield: comment,
+    # add -> read back -> compare, remove -> read back, and reconciliation every 30 s.
     def _activate(self, db: Session, a: MitigationAction, now: datetime, **detail) -> None:
         duration = int((a.plan or {}).get("duration_seconds") or 3600)
         a.expires_at = now + timedelta(seconds=duration)
@@ -484,14 +511,17 @@ class Controller:
         a.error = None
         transition(db, a, S.ACTIVE, ACTOR, "active", **detail)
 
-    def _filter_rows(self, db: Session, a: MitigationAction, create: bool) -> list[FilterRule]:
+    def _backend(self, kind: "_Kind") -> flt.FilterBackend:
+        return self.filters if kind.name == "filter" else self.steers
+
+    def _rule_rows(self, db: Session, a: MitigationAction, create: bool, kind: "_Kind") -> list[FilterRule]:
         rows = db.execute(select(FilterRule).where(FilterRule.action_id == a.id, FilterRule.status.notin_(("removed", "failed")))
                           .order_by(FilterRule.id)).scalars().all()
         if rows or not create:
             return list(rows)
-        for n, m in enumerate(((a.plan or {}).get("route") or {}).get("filters") or []):
+        for n, m in enumerate(((a.plan or {}).get("route") or {}).get(kind.plan_key) or []):
             r = FilterRule(action_id=a.id, router_id=a.router_id, comment=flt.comment(str(a.id), n), match=m,
-                           status="pending", backend=self.filters.name)
+                           status="pending", backend=self._backend(kind).name, kind=kind.name)
             db.add(r)
             rows.append(r)
         db.flush()
@@ -501,7 +531,8 @@ class Controller:
         r = db.get(Router, router_id) if router_id else None
         return flt.target_of(r) if r is not None else None
 
-    def _execute_filter(self, aid: uuid.UUID) -> int:
+    def _execute_rules(self, aid: uuid.UUID, kind: "_Kind") -> int:
+        be = self._backend(kind)
         with self.sessions() as db, db.begin():
             a = self._lock(db, aid, S.APPROVED, S.EXECUTING)
             if a is None:
@@ -509,9 +540,9 @@ class Controller:
             if a.state == S.APPROVED:
                 if not self._start(db, a):
                     return 0
-                transition(db, a, S.EXECUTING, ACTOR, "executing", filter_backend=self.filters.name)
-            rows = self._filter_rows(db, a, create=True)
-            wanted = [(r.comment, flt.Match.from_dict(r.match)) for r in rows]
+                transition(db, a, S.EXECUTING, ACTOR, "executing", backend=be.name)
+            rows = self._rule_rows(db, a, create=True, kind=kind)
+            wanted = [(r.comment, kind.spec(r.match)) for r in rows]
             target = self._router(db, a.router_id)
             started, timeout = a.started_at, a.timeout_seconds
         err, refused, got = None, False, {}
@@ -519,14 +550,14 @@ class Controller:
             if target is None:
                 raise SpeakerRefused("the router of this action no longer exists")
             if not wanted:
-                raise SpeakerRefused("the action has no filter rules")
-            have = self.filters.rules(target)
+                raise SpeakerRefused("the action has no rules")
+            have = be.rules(target)
             for cmt, m in wanted:
                 cur = have.get(cmt)
-                if cur is None or not flt.same_rule(m, cur.get("row") or {}):
-                    self.filters.add(target, cmt, m)
-            got = self.filters.rules(target)
-            bad = [cmt for cmt, m in wanted if cmt not in got or not flt.same_rule(m, got[cmt].get("row") or {})]
+                if cur is None or not kind.same(m, cur.get("row") or {}):
+                    be.add(target, cmt, m)
+            got = be.rules(target)
+            bad = [cmt for cmt, m in wanted if cmt not in got or not kind.same(m, got[cmt].get("row") or {})]
             if bad:
                 err = f"added, but {len(bad)} rule(s) are not on {target.name} as planned"
         except SpeakerError as e:
@@ -536,20 +567,20 @@ class Controller:
             if a is None:
                 return 0
             now = self.clock()
-            rows = self._filter_rows(db, a, create=False)
+            rows = self._rule_rows(db, a, create=False, kind=kind)
             if err is None:
                 for r in rows:
-                    r.status, r.backend = "active", self.filters.name
+                    r.status, r.backend = "active", be.name
                     r.added_at = r.added_at or now
                     r.verified_at = now
                     r.router_rule_id = (got.get(r.comment) or {}).get("id")
                     r.last_result = {"ok": True, "at": now.isoformat()}
                 if a.state == S.WITHDRAWING:
                     return 1
-                self._activate(db, a, now, filters=len(rows), router=target.name if target else None,
-                               simulation=self.filters.name == "simulated", filter_backend=self.filters.name)
-                audit.record(db, audit.SYSTEM_ACTOR, "mitigation.filter_add", "mitigation_action", a.id,
-                             after={"router": target.name if target else None, "backend": self.filters.name,
+                self._activate(db, a, now, rules=len(rows), router=target.name if target else None,
+                               simulation=be.name == "simulated", backend=be.name)
+                audit.record(db, audit.SYSTEM_ACTOR, f"mitigation.{kind.name}_add", "mitigation_action", a.id,
+                             after={"router": target.name if target else None, "backend": be.name,
                                     "rules": [r.match for r in rows]})
                 self.next_try.pop(aid, None)
                 return 1
@@ -564,22 +595,23 @@ class Controller:
             self._later(aid)
             return 0
 
-    def _remove_filter(self, aid: uuid.UUID, frm: S, to: S, kind: str) -> int:
+    def _remove_rules(self, aid: uuid.UUID, frm: S, to: S, verb: str, kind: "_Kind") -> int:
+        be = self._backend(kind)
         with self.sessions() as db:
             a = db.get(MitigationAction, aid)
             if a is None or a.state != frm:
                 return 0
-            rows = self._filter_rows(db, a, create=False)
+            rows = self._rule_rows(db, a, create=False, kind=kind)
             comments = [r.comment for r in rows]
             target = self._router(db, a.router_id)
         err = None
         if comments and target is not None:
             try:
-                have = self.filters.rules(target)
+                have = be.rules(target)
                 for cmt in comments:
                     if cmt in have:
-                        self.filters.remove(target, cmt)
-                left = set(comments) & set(self.filters.rules(target))
+                        be.remove(target, cmt)
+                left = set(comments) & set(be.rules(target))
                 if left:
                     err = f"removed, but {len(left)} rule(s) are still on {target.name}"
             except SpeakerError as e:
@@ -589,10 +621,10 @@ class Controller:
             if a is None:
                 return 0
             now = self.clock()
-            rows = self._filter_rows(db, a, create=False)
+            rows = self._rule_rows(db, a, create=False, kind=kind)
             if err:
                 a.error = err
-                record(db, a, None, ACTOR, f"{kind}_failed", error=err)
+                record(db, a, None, ACTOR, f"{verb}_failed", error=err)
                 for r in rows:
                     r.status = "removing"
                 self._later(aid)
@@ -600,39 +632,40 @@ class Controller:
             for r in rows:
                 r.status, r.removed_at = ("removed", now)
             a.completed_at = now
-            transition(db, a, to, ACTOR, kind, reason=a.withdraw_reason or a.error)
-            audit.record(db, audit.SYSTEM_ACTOR, f"mitigation.filter_{'remove' if to == S.WITHDRAWN else 'rollback'}",
+            transition(db, a, to, ACTOR, verb, reason=a.withdraw_reason or a.error)
+            audit.record(db, audit.SYSTEM_ACTOR, f"mitigation.{kind.name}_{'remove' if to == S.WITHDRAWN else 'rollback'}",
                          "mitigation_action", a.id, after={"router": target.name if target else None, "rules": comments,
                                                            "reason": a.withdraw_reason or a.error})
             self.next_try.pop(aid, None)
             return 1
 
-    def reconcile_filters(self) -> dict:
-        """Every router's Shield rules against active filter actions: re-add missing ones, remove Shield
-        rules nothing asks for, and record the routers' drop counters. Never touches other rules."""
+    def reconcile_rules(self, kind: "_Kind") -> dict:
+        """Every router's Shield rules of this kind against active actions: re-add missing ones, remove
+        Shield rules nothing asks for, and record counters. Never touches other rules."""
+        be = self._backend(kind)
         with self.sessions() as db:
             routers = db.execute(select(Router).where(Router.enabled)).scalars().all()
-            if self.filters.name == "routeros":
+            if be.name == "routeros":
                 routers = [r for r in routers if r.filter_username and r.filter_password_enc]
             targets = [flt.target_of(r) for r in routers]
             active = db.execute(select(FilterRule, MitigationAction).join(
                 MitigationAction, MitigationAction.id == FilterRule.action_id).where(
-                MitigationAction.state == S.ACTIVE, FilterRule.status == "active")).all()
-            desired: dict[int, dict[str, flt.Match]] = {}
+                MitigationAction.state == S.ACTIVE, FilterRule.status == "active", FilterRule.kind == kind.name)).all()
+            desired: dict[int, dict[str, object]] = {}
             for fr, a in active:
-                desired.setdefault(a.router_id, {})[fr.comment] = flt.Match.from_dict(fr.match)
+                desired.setdefault(a.router_id, {})[fr.comment] = kind.spec(fr.match)
             busy = {str(x) for x in db.execute(select(MitigationAction.id).where(
-                MitigationAction.strategy == Strategy.LOCAL_FILTER,
+                MitigationAction.strategy == kind.strategy,
                 MitigationAction.state.in_([S.APPROVED, S.EXECUTING, S.WITHDRAWING, S.FAILED]))).scalars()}
         readded, removed, errors, counters = [], [], [], {}
         for t in targets:
             want = desired.get(t.id, {})
             try:
-                have = self.filters.rules(t)
+                have = be.rules(t)
                 for cmt, m in want.items():
                     cur = have.get(cmt)
-                    if cur is None or not flt.same_rule(m, cur.get("row") or {}):
-                        self.filters.add(t, cmt, m)
+                    if cur is None or not kind.same(m, cur.get("row") or {}):
+                        be.add(t, cmt, m)
                         readded.append(f"{t.name}:{cmt}")
                 for cmt in have:
                     if cmt in want:
@@ -641,33 +674,44 @@ class Controller:
                     owner = cmt.split(":")[1] if cmt.count(":") >= 2 else ""
                     if owner in busy:
                         continue
-                    self.filters.remove(t, cmt)
+                    be.remove(t, cmt)
                     removed.append(f"{t.name}:{cmt}")
             except SpeakerError as e:
                 errors.append(f"{t.name}: {e}")
         now = self.clock()
         if counters or readded or removed:
             with self.sessions() as db, db.begin():
-                for fr in db.execute(select(FilterRule).where(FilterRule.comment.in_(list(counters)),
-                                                              FilterRule.status == "active")).scalars():
-                    c = counters[fr.comment]
-                    fr.packets, fr.bytes, fr.counted_at = c.get("packets"), c.get("bytes"), now
+                if kind.name == "filter":
+                    for fr in db.execute(select(FilterRule).where(FilterRule.comment.in_(list(counters)),
+                                                                  FilterRule.status == "active")).scalars():
+                        c = counters[fr.comment]
+                        fr.packets, fr.bytes, fr.counted_at = c.get("packets"), c.get("bytes"), now
                 if readded or removed:
-                    audit.record(db, audit.SYSTEM_ACTOR, "mitigation.filter_reconcile", "filters", self.filters.name,
+                    audit.record(db, audit.SYSTEM_ACTOR, f"mitigation.{kind.name}_reconcile", f"{kind.name}s", be.name,
                                  after={"readded": readded, "removed": removed})
-        self.last_filter_reconcile = {"at": now.isoformat(), "ok": not errors, "backend": self.filters.name,
-                                      "rules": sum(len(v) for v in desired.values()), "readded": readded,
-                                      "removed": removed, "errors": errors}
+        out = {"at": now.isoformat(), "ok": not errors, "backend": be.name,
+               "rules": sum(len(v) for v in desired.values()), "readded": readded, "removed": removed, "errors": errors}
+        if kind.name == "filter":
+            self.last_filter_reconcile = out
+        else:
+            self.last_steer_reconcile = out
         if readded or removed or errors:
-            log.warning("filter reconcile: %s", self.last_filter_reconcile)
-        return self.last_filter_reconcile
+            log.warning("%s reconcile: %s", kind.name, out)
+        return out
+
+    def reconcile_filters(self) -> dict:
+        return self.reconcile_rules(KINDS[Strategy.LOCAL_FILTER])
+
+    def reconcile_steering(self) -> dict:
+        return self.reconcile_rules(KINDS[Strategy.STEERING])
 
     # ------------------------------------------------------------ 6. reconcile
     def reconcile(self) -> dict:
-        try:
-            self.reconcile_filters()
-        except Exception:
-            log.exception("filter reconcile failed")
+        for f in (self.reconcile_filters, self.reconcile_steering):
+            try:
+                f()
+            except Exception:
+                log.exception("%s failed", f.__name__)
         try:
             if hasattr(self.speaker, "sync"):
                 self.speaker.sync()          # sessions and policies first (e.g. after FRR restarted)
@@ -681,7 +725,7 @@ class Controller:
         reannounced, withdrawn, errors = [], [], []
         with self.sessions() as db:
             active = db.execute(select(MitigationAction).where(MitigationAction.state == S.ACTIVE,
-                                                               MitigationAction.strategy != Strategy.LOCAL_FILTER)).scalars().all()
+                                                               MitigationAction.strategy.notin_(list(KINDS)))).scalars().all()
             desired = {_route_of(a).key: (a.id, _route_of(a)) for a in active}
             executing = {str(x) for x in db.execute(select(MitigationAction.id).where(
                 MitigationAction.state.in_([S.APPROVED, S.EXECUTING]))).scalars()}
@@ -744,7 +788,8 @@ class Controller:
                 "speaker": self.speaker.name, "leader": self.leader, "peers": peers,
                 "speaker_routes": rib, "last_reconcile": self.last_reconcile,
                 "last_interlock": self.last_interlock, "filter_backend": self.filters.name,
-                "last_filter_reconcile": self.last_filter_reconcile}), ex=30)
+                "last_filter_reconcile": self.last_filter_reconcile, "steering_backend": self.steers.name,
+                "last_steer_reconcile": self.last_steer_reconcile}), ex=30)
         except redis.RedisError:
             pass
 

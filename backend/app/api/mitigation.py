@@ -49,6 +49,8 @@ class PlanIn(BaseModel):
     # local_filter only
     router_ids: list[int] | None = None
     filters: list[dict] | None = Field(None, max_length=8)
+    # steering only
+    steering: list[dict] | None = Field(None, max_length=16)
 
     def request(self, automatic: bool = False) -> PlanRequest:
         return PlanRequest(target=self.target, strategy=self.strategy,
@@ -58,7 +60,9 @@ class PlanIn(BaseModel):
                            automatic=automatic,
                            router_ids=sorted(set(self.router_ids)) if self.router_ids is not None else None,
                            filters=[{k: f.get(k) for k in ("protocol", "src_port", "dst_port", "fragment", "label")}
-                                    for f in self.filters] if self.filters is not None else None)
+                                    for f in self.filters] if self.filters is not None else None,
+                           steering=[{k: f.get(k) for k in ("upstream_id", "mode", "prepend", "communities")}
+                                     for f in self.steering] if self.steering is not None else None)
 
 
 class ReasonIn(BaseModel):
@@ -251,9 +255,11 @@ def _route_out(r: RtbhRoute, ups: dict) -> dict:
 
 def _filter_out(f: FilterRule, routers: dict) -> dict:
     from ..mitigation.filtering import Match
-    m = Match.from_dict(f.match)
+    from ..mitigation.steering import Steer
+    m = Steer.from_dict(f.match) if f.kind == "steer" else Match.from_dict(f.match)
     return {"id": f.id, "action_id": str(f.action_id), "router_id": f.router_id, "router": routers.get(f.router_id),
-            "comment": f.comment, "match": f.match, "description": m.describe(), "status": f.status, "backend": f.backend,
+            "comment": f.comment, "kind": f.kind, "match": f.match, "description": m.describe(), "status": f.status,
+            "backend": f.backend,
             "router_rule_id": f.router_rule_id, "added_at": f.added_at, "verified_at": f.verified_at,
             "removed_at": f.removed_at, "packets": f.packets, "bytes": f.bytes, "counted_at": f.counted_at,
             "last_result": f.last_result}
@@ -261,13 +267,17 @@ def _filter_out(f: FilterRule, routers: dict) -> dict:
 
 @router.get("/filters")
 def filters(state: str = Query("live", pattern="^(live|all)$"), limit: int = Query(200, ge=1, le=2000),
+            kind: str | None = Query(None, pattern="^(filter|steer)$"),
             _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
     """Shield's firewall drop rules (local filtering) with the routers' drop counters."""
     q = select(FilterRule).order_by(FilterRule.id.desc()).limit(limit)
+    if kind:
+        q = q.where(FilterRule.kind == kind)
     if state == "live":
         q = q.where(FilterRule.status.in_(("pending", "active", "removing")))
     routers = dict(db.execute(select(Router.id, Router.name)).all())
     return {"backend": get_setting(db, "filter_backend", "simulated"),
+            "steering_backend": get_setting(db, "steering_backend", "simulated"),
             "limit": int(get_setting(db, "filter_max_rules", 50)),
             "rules": [_filter_out(f, routers) for f in db.execute(q).scalars()]}
 
@@ -317,6 +327,7 @@ def controller_status(_: Principal = Depends(require(Perm.VIEW)), db: Session = 
         "production_enabled": get_setting(db, "bgp_production_enabled", False),
         "last_interlock": (st or {}).get("last_interlock") or [],
         "filter_backend": get_setting(db, "filter_backend", "simulated"),
+        "steering_backend": get_setting(db, "steering_backend", "simulated"),
     }
 
 
