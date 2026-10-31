@@ -87,26 +87,7 @@ show log-bgp "/log/print where topics~\"bgp\""
 pip install -q playwright >/dev/null 2>&1 && python3 -m playwright install --with-deps chromium >/dev/null 2>&1
 python3 "$HERE/shots.py" "$OUT" || true
 
-echo "== filter syntax probe"
 show route-250 "/routing/route/print detail where dst-address=163.5.191.250/32"
-probe() {  # label, rule text
-  printf '%s\n' "/routing/filter/rule remove [find where chain=probe-in]" \
-    "/routing/filter/rule add chain=probe-in rule=\"$2\"" \
-    "/routing/filter/rule add chain=probe-in rule=\"reject\"" \
-    "/routing/bgp/connection set shield-rtbh input.filter=probe-in" | ros
-  sleep 2; echo "/routing/bgp/session refresh [find]" | ros; sleep 6
-  { echo "### $1: $2"; echo '/routing/route/print where belongs-to~"bgp"' | ros; echo '/ip/route/print where blackhole' | ros; } | tee -a "$OUT/probe-filter.txt"
-}
-probe A 'if (dst in 163.5.191.0/24) { accept }'
-probe B 'if (dst in 163.5.191.0/24 && dst-len == 32) { accept }'
-probe C 'if (dst in 163.5.191.0/24 && dst-len >= 32) { accept }'
-probe D 'if (bgp-communities includes 154950:666) { accept }'
-probe E 'if (dst in 163.5.191.0/24 && dst-len >= 32 && bgp-communities includes 154950:666) { accept }'
-probe F 'if (dst in 163.5.191.0/24 && dst-len >= 32 && bgp-communities includes 154950:666) { set blackhole yes; accept }'
-probe G 'if (dst in 163.5.191.0/24 && dst-len == 32 && bgp-communities includes 154950:666) { set blackhole yes; accept; }'
-probe H 'if (dst in 163.5.191.0/24 && dst-len>=32 && bgp-communities includes 154950:666) { set blackhole yes; accept; }'
-show route-250-after "/ip/route/print detail where dst-address=163.5.191.250/32"
-echo "/routing/bgp/connection set shield-rtbh input.filter=shield-rtbh-in" | ros
 echo "== removal (guide G4)"
 cat > /tmp/rm.rsc <<'RSC'
 /routing/bgp/connection remove [find name="shield-rtbh"]
