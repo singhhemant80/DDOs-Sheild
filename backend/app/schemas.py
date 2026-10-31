@@ -110,6 +110,7 @@ class PrefixBase(BaseModel):
     rtbh_allowed: bool = False
     steering_allowed: bool = False
     filtering_allowed: bool = False
+    scrubbing_allowed: bool = False
     min_mitigation_prefix_len: int | None = Field(None, ge=0, le=128)
     preferred_upstream_id: int | None = None
 
@@ -124,7 +125,7 @@ class PrefixCreate(PrefixBase):
 
     @model_validator(mode="after")
     def _mitigation_needs_ownership(self):
-        if (self.rtbh_allowed or self.steering_allowed or self.filtering_allowed) and not (
+        if (self.rtbh_allowed or self.steering_allowed or self.filtering_allowed or self.scrubbing_allowed) and not (
             self.ownership_verified and self.ownership_evidence
         ):
             raise ValueError("enabling any mitigation requires ownership_verified=true and ownership_evidence")
@@ -139,6 +140,7 @@ class PrefixUpdate(BaseModel):
     rtbh_allowed: bool | None = None
     steering_allowed: bool | None = None
     filtering_allowed: bool | None = None
+    scrubbing_allowed: bool | None = None
     min_mitigation_prefix_len: int | None = Field(None, ge=0, le=128)
     preferred_upstream_id: int | None = None
 
@@ -153,6 +155,7 @@ class PrefixOut(_Out):
     rtbh_allowed: bool
     steering_allowed: bool
     filtering_allowed: bool
+    scrubbing_allowed: bool = False
     min_mitigation_prefix_len: int
     preferred_upstream_id: int | None
     authorized_by_id: uuid.UUID | None
@@ -171,6 +174,7 @@ class EligibilityOut(BaseModel):
     rtbh_allowed: bool
     steering_allowed: bool
     filtering_allowed: bool
+    scrubbing_allowed: bool = False
     within_scope_limit: bool
     customer: dict | None
     reasons: list[str]

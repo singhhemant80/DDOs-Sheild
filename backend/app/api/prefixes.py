@@ -19,7 +19,7 @@ from ..schemas import EligibilityOut, PrefixCreate, PrefixOut, PrefixUpdate
 
 router = APIRouter(prefix="/prefixes", tags=["prefixes"])
 
-_MITIGATION_FLAGS = ("rtbh_allowed", "steering_allowed", "filtering_allowed")
+_MITIGATION_FLAGS = ("rtbh_allowed", "steering_allowed", "filtering_allowed", "scrubbing_allowed")
 
 
 def _get(db: Session, prefix_id: int) -> ProtectedPrefix:
@@ -75,14 +75,15 @@ def eligibility_for(db: Session, net) -> EligibilityOut:
         rtbh = False
         reasons.append("Customer has opted out of RTBH.")
     words = {"rtbh_allowed": "Blackholing", "steering_allowed": "Steering via another upstream",
-             "filtering_allowed": "Local filtering"}
+             "filtering_allowed": "Local filtering", "scrubbing_allowed": "Diversion to a scrubbing provider"}
     for flag in _MITIGATION_FLAGS:
         if not getattr(pp, flag):
             reasons.append(f"{words[flag]} is not enabled for {pp.prefix}.")
     return EligibilityOut(
         target=str(net), protected_prefix=str(pp.prefix), protected_prefix_id=pp.id, enabled=pp.enabled,
         rtbh_allowed=rtbh, steering_allowed=pp.enabled and pp.steering_allowed,
-        filtering_allowed=pp.enabled and pp.filtering_allowed and within, within_scope_limit=within,
+        filtering_allowed=pp.enabled and pp.filtering_allowed and within,
+        scrubbing_allowed=pp.enabled and pp.scrubbing_allowed, within_scope_limit=within,
         customer=None if cust is None else {"customer_ref": cust.customer_ref, "customer_name": cust.customer_name,
                                             "service_type": cust.service_type.value, "address": str(cust.address)},
         reasons=reasons,

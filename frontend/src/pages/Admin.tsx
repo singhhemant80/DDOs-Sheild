@@ -199,6 +199,10 @@ function SettingValue({ s, editable, onSave }: { s: Setting; editable: boolean; 
     return <Select aria-label={s.key} value={String(s.value)} onChange={onSave}
       options={[["simulated", "Simulated (nothing leaves Shield)"], ["frr", "FRR (Shield's BGP speaker)"]]} />;
   }
+  if (s.key === "scrubbing_backend") {
+    return <Select aria-label={s.key} value={String(s.value)} onChange={onSave}
+      options={[["simulated", "Simulated (no provider is called)"], ["live", "Live (Shield calls the provider)"]]} />;
+  }
   if (s.key === "steering_backend") {
     return <Select aria-label={s.key} value={String(s.value)} onChange={onSave}
       options={[["simulated", "Simulated (no router is changed)"], ["routeros", "RouterOS (Shield's filter account)"]]} />;

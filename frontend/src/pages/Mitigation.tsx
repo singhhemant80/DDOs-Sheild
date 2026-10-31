@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Check as CheckIcon, CircleAlert, Filter, FlaskConical, Pencil, Plus, Radio, ShieldBan, Shuffle, TriangleAlert, Undo2, X } from "lucide-react";
+import { ArrowLeft, Check as CheckIcon, CircleAlert, Filter, FlaskConical, Pencil, Plus, Radio, ShieldBan, Shuffle, Sparkles, TriangleAlert, Undo2, X } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useApi } from "../lib/hooks";
@@ -25,7 +25,7 @@ export type Action = {
   requested_by: string | null; approved_by: string | null; approved_at: string | null; created_at: string;
   started_at: string | null; expires_at: string | null; completed_at: string | null; extensions: number; attempts: number;
   error: string | null; rejected_reason: string | null; withdraw_reason: string | null; route: PlanRoute | null;
-  router_id?: number | null; router?: string | null;
+  router_id?: number | null; router?: string | null; provider?: string | null;
   checks: CheckRow[]; impact: Plan["impact"];
 };
 type FilterLedger = { id: number; action_id: string; router: string | null; comment: string; description: string; status: string;
@@ -49,10 +49,15 @@ const FILTER_EVENT_WORD: Record<string, string> = {
   active: "Rules added and verified on the router", announce_failed: "Adding the rules failed", withdrawn: "Rules removed",
   rolled_back: "Rules rolled back", withdrawn_failed: "Removing the rules failed",
 };
-export const whereOf = (a: { strategy: string; upstream: string | null; router?: string | null }) =>
-  a.strategy === "local_filter" ? `Filter on ${a.router ?? "router"}`
+export const whereOf = (a: { strategy: string; upstream: string | null; router?: string | null; provider?: string | null }) =>
+  a.strategy === "scrubbing" ? `Scrubbing at ${a.provider ?? "provider"}`
+    : a.strategy === "local_filter" ? `Filter on ${a.router ?? "router"}`
     : a.strategy === "steering" ? `Steer away from ${a.upstream ?? "upstream"}` : a.upstream ?? "Own edge routers";
 const RULED = ["local_filter", "steering"];
+const SCRUB_EVENT_WORD: Record<string, string> = {
+  active: "Diversion requested and confirmed", announce_failed: "The provider refused or failed", withdrawn: "Diversion stopped",
+  rolled_back: "Diversion rolled back", reconciled_reannounced: "Diversion requested again (provider had stopped it)",
+};
 export const ACTION_WORD: Record<string, string> = {
   proposed: "Awaiting approval", approved: "Approved", executing: "Announcing", active: "Active",
   withdrawing: "Withdrawing", withdrawn: "Withdrawn", rejected: "Rejected", failed: "Failed", rolled_back: "Rolled back",
@@ -131,8 +136,15 @@ export function SimulationBanner() {
   );
 }
 
-export function FilterBanner({ steering = false }: { steering?: boolean }) {
-  const st = useApi<{ filter_backend?: string; steering_backend?: string }>("/mitigation/status", 30_000);
+export function FilterBanner({ steering = false, scrubbing = false }: { steering?: boolean; scrubbing?: boolean }) {
+  const st = useApi<{ filter_backend?: string; steering_backend?: string; scrubbing_backend?: string }>("/mitigation/status", 30_000);
+  if (scrubbing) {
+    return st.data?.scrubbing_backend === "live"
+      ? <Notice tone="signal"><span className="inline-flex items-start gap-2"><Radio size={16} className="mt-0.5 shrink-0" />
+          <span><strong>Diversions are real.</strong> Shield calls the provider's API to start and stop scrubbing for the /24.</span></span></Notice>
+      : <Notice tone="warn"><span className="inline-flex items-start gap-2"><FlaskConical size={16} className="mt-0.5 shrink-0" />
+          <span><strong>Scrubbing simulation.</strong> No provider is called. Set scrubbing_backend to live in Settings to divert for real.</span></span></Notice>;
+  }
   if (steering) {
     return st.data?.steering_backend === "routeros"
       ? <Notice tone="signal"><span className="inline-flex items-start gap-2"><Radio size={16} className="mt-0.5 shrink-0" />
@@ -283,6 +295,8 @@ export function NewMitigationDialog({ target: initial = "", incidentId, initialS
   const [chosenRouters, setChosenRouters] = useState<number[] | null>(null);
   const [filters, setFilters] = useState<FilterMatch[] | null>(null);   // null: derive from the attack
   const [steer, setSteer] = useState<SteerEntry[] | null>(null);        // null: Shield suggests
+  const scrubbers = useApi<{ id: number; name: string; enabled: boolean; verified_at: string | null; method: string }[]>("/scrubbing/providers");
+  const [scrubber, setScrubber] = useState<string>("");
   const [minutes, setMinutes] = useState("60");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -293,15 +307,17 @@ export function NewMitigationDialog({ target: initial = "", incidentId, initialS
   const rsel = chosenRouters ?? enabledRouters.map((r) => r.id);
   const filtering = strategy === "local_filter";
   const steering = strategy === "steering";
+  const scrubbing = strategy === "scrubbing";
   const body = () => ({ target: target.trim(), strategy, incident_id: incidentId ?? null, duration_minutes: Number(minutes) || null,
     upstream_ids: strategy === "rtbh_upstream" ? sel : null,
     router_ids: filtering ? rsel : null, filters: filtering ? filters : null,
-    steering: steering && steer ? steer.map(({ upstream_id, mode, prepend, communities }) => ({ upstream_id, mode, prepend, communities })) : null });
+    steering: steering && steer ? steer.map(({ upstream_id, mode, prepend, communities }) => ({ upstream_id, mode, prepend, communities })) : null,
+    scrubbing_provider_id: scrubbing && scrubber ? Number(scrubber) : null });
 
   useEffect(() => {
     if (keepPlan.current) { keepPlan.current = false; return; }
     setPlan(null); key.current = idempotencyKey();
-  }, [target, strategy, chosen, chosenRouters, filters, steer, minutes]);
+  }, [target, strategy, chosen, chosenRouters, filters, steer, scrubber, minutes]);
 
   const preview = async () => {
     setErr(null); setBusy(true);
@@ -328,18 +344,19 @@ export function NewMitigationDialog({ target: initial = "", incidentId, initialS
     } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
   };
   return (
-    <Dialog open title={filtering ? "Filter attack traffic" : steering ? "Steer traffic between upstreams" : "Blackhole an address"} onClose={onClose}
+    <Dialog open title={filtering ? "Filter attack traffic" : steering ? "Steer traffic between upstreams" : scrubbing ? "Divert to a scrubbing provider" : "Blackhole an address"} onClose={onClose}
       footer={<>
         <Button variant="quiet" onClick={onClose}>Cancel</Button>
         <Button onClick={preview} disabled={busy || !target.trim()}>Preview</Button>
         <Button variant="primary" onClick={submit} disabled={busy || !plan || plan.blocked}>Propose for approval</Button>
       </>}>
-      {filtering || steering ? <FilterBanner steering={steering} /> : <SimulationBanner />}
+      {scrubbing ? <FilterBanner scrubbing /> : filtering || steering ? <FilterBanner steering={steering} /> : <SimulationBanner />}
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Target" hint={steering ? "An address; Shield steers the /24 (/48) holding it" : "An address (becomes /32 or /128)"}><Input value={target} onChange={(e) => setTarget(e.target.value)} placeholder="163.5.191.20" /></Field>
+        <Field label="Target" hint={steering || scrubbing ? "An address; Shield acts on the /24 (/48) holding it" : "An address (becomes /32 or /128)"}><Input value={target} onChange={(e) => setTarget(e.target.value)} placeholder="163.5.191.20" /></Field>
         <Field label="How"><Select value={strategy} onChange={setStrategy}
           options={[["rtbh_upstream", "Blackhole at the upstream providers"], ["rtbh_internal", "Blackhole at my own edge routers"],
-                    ["local_filter", "Filter only the attack traffic"], ["steering", "Move the /24 away from an upstream"]]} /></Field>
+                    ["local_filter", "Filter only the attack traffic"], ["steering", "Move the /24 away from an upstream"],
+                    ["scrubbing", "Divert the /24 to a scrubbing provider"]]} /></Field>
         {strategy === "rtbh_upstream" && <div className="sm:col-span-2">
           <div className="mb-1 text-sm font-medium">Upstreams</div>
           {usable.length ? <div className="flex flex-wrap gap-x-5 gap-y-2">{usable.map((u) => (
@@ -364,6 +381,8 @@ export function NewMitigationDialog({ target: initial = "", incidentId, initialS
               : <FilterEditor rows={filters} onChange={setFilters} />}
           </div>
         </div>}
+        {scrubbing && <Field label="Provider"><Select value={scrubber} onChange={setScrubber}
+          options={[["", "First verified provider"], ...(scrubbers.data ?? []).filter((x) => x.enabled).map((x) => [String(x.id), `${x.name}${x.verified_at ? "" : " (not verified)"}`] as [string, string])]} /></Field>}
         {steering && <div className="space-y-2 sm:col-span-2">
           <div className="text-sm font-medium">Upstreams to change</div>
           <p className="text-sm text-ink-2">Inbound traffic follows what you announce. Stop announcing the prefix to an upstream (traffic then
@@ -512,7 +531,7 @@ export function ActionDetail() {
     <div className="space-y-5">
       <Link to="/mitigation" className="inline-flex items-center gap-1 text-sm text-ink-2 hover:text-ink"><ArrowLeft size={15} /> Mitigation center</Link>
       <PageHeader title={a.strategy === "local_filter" ? `Filter attack traffic to ${a.target}`
-        : a.strategy === "steering" ? `Steer ${a.target}` : `Blackhole ${a.target}`}
+        : a.strategy === "steering" ? `Steer ${a.target}` : a.strategy === "scrubbing" ? `Scrub ${a.target}` : `Blackhole ${a.target}`}
         description={<>{a.automatic ? "Proposed by a policy" : `Proposed by ${a.requested_by ?? "–"}`} {dateTime(a.created_at)}
           {a.approved_by ? `, approved by ${a.approved_by}` : a.approved_at ? ", approved by policy" : ""}
           {a.incident_id && <> for <Link className="text-signal hover:underline" to={`/attacks/${a.incident_id}`}>this attack</Link></>}.</>}
@@ -523,7 +542,7 @@ export function ActionDetail() {
           {a.state === "active" && can("mitigation_approve") && <Button onClick={() => setExtend(true)}>Extend</Button>}
           {anyActive && can("mitigation_withdraw") && <Button onClick={() => act(() => api(`/mitigation/actions/${a.id}/withdraw?whole_group=true`, { method: "POST", body: { reason: "withdrawn by operator" } }))}><Undo2 size={16} /> Withdraw</Button>}
         </>} />
-      {RULED.includes(a.strategy) ? <FilterBanner steering={a.strategy === "steering"} /> : <SimulationBanner />}
+      {a.strategy === "scrubbing" ? <FilterBanner scrubbing /> : RULED.includes(a.strategy) ? <FilterBanner steering={a.strategy === "steering"} /> : <SimulationBanner />}
       <ErrorLine error={err} />
       {RULED.includes(a.strategy) && (
         <Section title={a.strategy === "steering" ? "Steering rules on the router" : "Drop rules on the router"} flush
@@ -540,7 +559,7 @@ export function ActionDetail() {
             ]} />
         </Section>
       )}
-      <Section title={a.strategy === "local_filter" ? "Routers" : a.strategy === "steering" ? "Upstreams" : "Routes"} flush>
+      <Section title={a.strategy === "local_filter" ? "Routers" : a.strategy === "steering" ? "Upstreams" : a.strategy === "scrubbing" ? "Diversion" : "Routes"} flush>
         <Table rows={a.group} rowKey={(x) => x.id}
           cols={[
             { key: "w", header: "Where", render: (x) => <><div className="font-medium">{whereOf(x)}</div>
@@ -564,7 +583,7 @@ export function ActionDetail() {
             <li key={n} className="grid gap-x-3 px-4 py-2 text-sm sm:grid-cols-[190px_150px_1fr]">
               <span className="whitespace-nowrap text-ink-2">{dateTime(e.at)}</span>
               <span className="text-ink-2">{(() => { const x = a.group.find((y) => y.id === e.action_id); return x ? whereOf(x) : ""; })()}</span>
-              <div><span className="font-medium">{(a.strategy === "local_filter" && FILTER_EVENT_WORD[e.detail.kind]) || (a.strategy === "steering" && STEER_EVENT_WORD[e.detail.kind]) || EVENT_WORD[e.detail.kind] || e.detail.kind}</span>
+              <div><span className="font-medium">{(a.strategy === "local_filter" && FILTER_EVENT_WORD[e.detail.kind]) || (a.strategy === "steering" && STEER_EVENT_WORD[e.detail.kind]) || (a.strategy === "scrubbing" && SCRUB_EVENT_WORD[e.detail.kind]) || EVENT_WORD[e.detail.kind] || e.detail.kind}</span>
                 {e.actor !== "controller" && <span className="text-ink-2"> by {e.actor}</span>}
                 {(e.detail.reason || e.detail.error || e.detail.reasons || e.detail.until) && <p className="mt-0.5 text-ink-2">
                   {e.detail.reason ?? e.detail.error ?? (e.detail.reasons ?? []).join("; ") ?? ""}{e.detail.until ? `until ${dateTime(e.detail.until)} (${e.detail.why})` : ""}</p>}
@@ -669,7 +688,7 @@ export function Policies() {
             { key: "s", header: "Applies to", render: (x) => <><span className="font-mono text-[13px]">{x.scope}</span>
               <div className="text-xs text-ink-3">{x.vectors.length ? x.vectors.map(vectorName).join(", ") : "any attack type"}</div></> },
             { key: "w", header: "When", render: (x) => `confidence ${Math.round(x.min_confidence * 100)}%+, confirmed for ${Math.round(x.min_duration_seconds / 60)} min` },
-            { key: "a", header: "Action", render: (x) => <>{x.allowed_strategies.map((s) => ({ rtbh_upstream: "Upstream blackhole", rtbh_internal: "Internal blackhole", local_filter: "Filter on router", steering: "Steer to the protected upstream" } as Record<string, string>)[s] ?? s).join(", ")}
+            { key: "a", header: "Action", render: (x) => <>{x.allowed_strategies.map((s) => ({ rtbh_upstream: "Upstream blackhole", rtbh_internal: "Internal blackhole", local_filter: "Filter on router", steering: "Steer to the protected upstream", scrubbing: "Divert to scrubbing" } as Record<string, string>)[s] ?? s).join(", ")}
               <div className="text-xs text-ink-3">{Math.round(x.mitigation_duration_seconds / 60)} min, at most {x.max_concurrent_actions} at once</div></> },
             { key: "e", header: "State", render: (x) => !x.enabled ? <span className="text-ink-3">Off</span>
               : x.requires_approval ? <Badge tone="signal">Proposes for approval</Badge> : <Badge tone="warn">Acts without approval</Badge> },
@@ -715,7 +734,7 @@ function PolicyDialog({ policy, onClose, onDone }: { policy: Policy | null; onCl
           <Input value={f.vectors} onChange={(e) => set("vectors", e.target.value)} /></Field></div>
         <Field label="Minimum confidence (%)"><Input inputMode="numeric" value={f.min_confidence} onChange={(e) => set("min_confidence", e.target.value)} /></Field>
         <Field label="Confirmed for at least (min)"><Input inputMode="numeric" value={f.min_duration} onChange={(e) => set("min_duration", e.target.value)} /></Field>
-        <Field label="Action"><Select value={f.strategy} onChange={(v) => set("strategy", v)} options={[["local_filter", "Filter the attack traffic on my routers"], ["steering", "Steer onto the DDoS-protected upstream"], ["rtbh_upstream", "Upstream blackhole"], ["rtbh_internal", "Internal blackhole"]]} /></Field>
+        <Field label="Action"><Select value={f.strategy} onChange={(v) => set("strategy", v)} options={[["local_filter", "Filter the attack traffic on my routers"], ["steering", "Steer onto the DDoS-protected upstream"], ["scrubbing", "Divert to the scrubbing provider"], ["rtbh_upstream", "Upstream blackhole"], ["rtbh_internal", "Internal blackhole"]]} /></Field>
         <Field label="Duration (min)"><Input inputMode="numeric" value={f.duration} onChange={(e) => set("duration", e.target.value)} /></Field>
         <Field label="Keep at least (min)" hint="Never withdrawn automatically before this"><Input inputMode="numeric" value={f.hold} onChange={(e) => set("hold", e.target.value)} /></Field>
         <Field label="At most at once"><Input inputMode="numeric" value={f.max} onChange={(e) => set("max", e.target.value)} /></Field>
@@ -733,8 +752,8 @@ function PolicyDialog({ policy, onClose, onDone }: { policy: Policy | null; onCl
 }
 
 // ---------------------------------------------------------------- on the attack page
-export function IncidentMitigation({ incidentId, target, eligible, filterEligible = false, steerEligible = false, open }:
-  { incidentId: string; target: string; eligible: boolean; filterEligible?: boolean; steerEligible?: boolean; open: boolean }) {
+export function IncidentMitigation({ incidentId, target, eligible, filterEligible = false, steerEligible = false, scrubEligible = false, open }:
+  { incidentId: string; target: string; eligible: boolean; filterEligible?: boolean; steerEligible?: boolean; scrubEligible?: boolean; open: boolean }) {
   const { can } = useAuth();
   const nav = useNavigate();
   const acts = useApi<Action[]>(`/mitigation/actions?state=all&incident_id=${incidentId}`, 10_000);
@@ -753,6 +772,7 @@ export function IncidentMitigation({ incidentId, target, eligible, filterEligibl
         <div className="flex flex-wrap gap-2">
           {filterEligible && <Button variant="primary" onClick={() => setCreating("local_filter")}><Filter size={16} /> Filter the attack traffic</Button>}
           {steerEligible && <Button onClick={() => setCreating("steering")}><Shuffle size={16} /> Steer away from an upstream</Button>}
+          {scrubEligible && <Button onClick={() => setCreating("scrubbing")}><Sparkles size={16} /> Divert to scrubbing</Button>}
           {eligible && <Button onClick={() => setCreating("rtbh_upstream")}><ShieldBan size={16} /> Blackhole this address</Button>}
         </div>}
       {creating && <NewMitigationDialog target={target.replace(/\/(32|128)$/, "")} incidentId={incidentId} initialStrategy={creating} onClose={() => setCreating(null)}

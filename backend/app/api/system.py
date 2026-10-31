@@ -169,6 +169,8 @@ def _validate_setting(key: str, value):
             raise HTTPException(422, "bgp_speaker must be 'simulated' or 'frr'")
         if key in ("filter_backend", "steering_backend") and value not in ("simulated", "routeros"):
             raise HTTPException(422, f"{key} must be 'simulated' or 'routeros'")
+        if key == "scrubbing_backend" and value not in ("simulated", "live"):
+            raise HTTPException(422, "scrubbing_backend must be 'simulated' or 'live'")
         if key in ("bgp_router_id", "rtbh_discard_nexthop_v4", "rtbh_discard_nexthop_v6") and value:
             import ipaddress
             want = 6 if key.endswith("v6") else 4
@@ -220,24 +222,25 @@ def update_setting(key: str, body: SettingUpdate, p: Principal = Depends(require
         from ..models import MitigationAction, Strategy
         live = db.execute(select(func.count()).select_from(MitigationAction).where(MitigationAction.state.in_(
             ["proposed", "approved", "executing", "active", "withdrawing", "failed"]),
-            MitigationAction.strategy.notin_([Strategy.LOCAL_FILTER, Strategy.STEERING]))).scalar_one()
+            MitigationAction.strategy.notin_([Strategy.LOCAL_FILTER, Strategy.STEERING, Strategy.SCRUBBING]))).scalar_one()
         if live:
             raise HTTPException(status.HTTP_409_CONFLICT,
                                 f"{live} mitigation actions are still open; withdraw or finish them before switching speaker")
         if body.value == "frr" and not p.mfa and get_setting(db, "require_mfa_for_mitigation", False):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Switching to the FRR speaker requires an MFA session")
-    if key in ("filter_backend", "steering_backend") and body.value != get_setting(db, key, "simulated"):
+    if key in ("filter_backend", "steering_backend", "scrubbing_backend") and body.value != get_setting(db, key, "simulated"):
         from ..models import MitigationAction, Strategy
-        strat = Strategy.LOCAL_FILTER if key == "filter_backend" else Strategy.STEERING
+        strat = {"filter_backend": Strategy.LOCAL_FILTER, "steering_backend": Strategy.STEERING,
+                 "scrubbing_backend": Strategy.SCRUBBING}[key]
         live = db.execute(select(func.count()).select_from(MitigationAction).where(MitigationAction.state.in_(
             ["proposed", "approved", "executing", "active", "withdrawing", "failed"]),
             MitigationAction.strategy == strat)).scalar_one()
         if live:
             raise HTTPException(status.HTTP_409_CONFLICT,
-                                f"{live} {'filter' if key == 'filter_backend' else 'steering'} actions are still open; "
+                                f"{live} {strat.value.replace('_', ' ')} actions are still open; "
                                 "withdraw or finish them before switching")
-        if body.value == "routeros" and not p.mfa and get_setting(db, "require_mfa_for_mitigation", False):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Filtering on real routers requires an MFA session")
+        if body.value in ("routeros", "live") and not p.mfa and get_setting(db, "require_mfa_for_mitigation", False):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Making real changes requires an MFA session")
     return _set(db, p, key, body.value, "setting.update")
 
 

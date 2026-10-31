@@ -33,7 +33,7 @@ import (
 	"shield/collector/internal/sflow"
 )
 
-const version = "0.9.1"
+const version = "0.9.2"
 
 type exporterStats struct {
 	kind             atomic.Value

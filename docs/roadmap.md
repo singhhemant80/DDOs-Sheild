@@ -10,8 +10,8 @@
 | 6 | RTBH controller in simulation mode | Full workflow with dry-run plans, approvals, idempotency, restart reconciliation | **Done** (docs/mitigation.md) |
 | 7 | Staging BGP with FRR, route filters, approval gates | Lab router accepts only authorised /32s; unauthorised and malformed requests rejected | **Done** with FRR lab routers (docs/bgp.md); MikroTik filter check pending |
 | 8 | Controlled live mitigation, rollback, verification | Acceptance tests prove unrelated prefixes unaffected | **Done** with FRR lab routers (docs/production.md); first production run is on your network |
-| 9 | Selective ISP steering, local filtering, scrubbing adapter | Each part drops or diverts only attack traffic, verified and reversible | **In progress**: local filtering (v0.9.0, docs/local-filtering.md) and steering (v0.9.1, docs/steering.md) done; scrubbing pending |
-| 10 | Alerting, reporting, hardening, production checklist | | Pending |
+| 9 | Selective ISP steering, local filtering, scrubbing adapter | Each part drops or diverts only attack traffic, verified and reversible | **Done**: local filtering (v0.9.0, docs/local-filtering.md), steering (v0.9.1, docs/steering.md), scrubbing adapter (v0.9.2, docs/scrubbing.md) |
+| 10 | Alerting, reporting, hardening, production checklist | | **Next** |
 
 > Note: the master specification document was truncated partway through Phase 9; Phase 9's
 > remaining text and any Phase 10 definition should be supplied before that work starts.
@@ -27,7 +27,8 @@ sidebar), together with the go-live steps still open on your installation.
 - Steering is done: Shield-owned rules in the BGP output filter towards one upstream (withhold,
   prepend, action communities), never leaving a prefix unannounced, simulated by default
   (`steering_backend`).
-- Still to come in Phase 9: a scrubbing-centre adapter.
+- The scrubbing adapter is done: provider API (HTTPS, token encrypted, status confirmation) or
+  manual, simulated by default (`scrubbing_backend`).
 
 ## Phase 8 notes
 

@@ -425,7 +425,7 @@ def test_policy_does_not_fire_too_early_or_for_other_vectors(client, engineer, n
 
 
 def test_policy_validation_and_permissions(client, engineer, noc, net):
-    r = client.post(f"{API}/policies", json={"name": "x", "scope": "163.5.191.0/24", "allowed_strategies": ["scrubbing"]},
+    r = client.post(f"{API}/policies", json={"name": "x", "scope": "163.5.191.0/24", "allowed_strategies": ["teleport"]},
                     headers=engineer)
     assert r.status_code == 422
     r = client.post(f"{API}/policies", json={"name": "x", "scope": "163.5.191.0/24", "vectors": ["made_up"]}, headers=engineer)

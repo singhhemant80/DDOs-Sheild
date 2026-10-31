@@ -346,6 +346,34 @@ class UpstreamProvider(TimestampMixin, Base):
     )
 
 
+class ScrubbingProvider(TimestampMixin, Base):
+    """An on-demand scrubbing service (Phase 9 part 3). Diversion is requested through the
+    provider's API (method "api"), or recorded for a person to trigger (method "manual")."""
+
+    __tablename__ = "scrubbing_providers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    method: Mapped[str] = mapped_column(String(16), nullable=False, default="api")       # api | manual
+    # {"activate": {"url", "method", "body", "headers"}, "deactivate": {...}, "status": {"url", "method",
+    #  "active_path", "active_value"}} - non-secret; the auth header value is in secret_enc.
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    auth_header: Mapped[str | None] = mapped_column(String(64))
+    secret_enc: Mapped[str | None] = mapped_column(Text)
+    documentation_ref: Mapped[str | None] = mapped_column(Text)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    min_prefix_len: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=24)
+    max_prefix_len: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=24)
+    max_prefixes: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    notes: Mapped[str | None] = mapped_column(Text)   # e.g. how clean traffic comes back (GRE tunnel ...)
+
+    __table_args__ = (
+        CheckConstraint("method IN ('api','manual')", name="ck_scrubbing_method"),
+        CheckConstraint("min_prefix_len <= max_prefix_len", name="ck_scrubbing_lengths"),
+    )
+
+
 class UpstreamRtbhPolicy(TimestampMixin, Base):
     """Per-upstream RTBH rules, taken from that provider's documentation. Nothing is assumed."""
 
@@ -433,6 +461,7 @@ class ProtectedPrefix(TimestampMixin, Base):
     rtbh_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     steering_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     filtering_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    scrubbing_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false", default=False)
     # Shortest prefix length any mitigation may target inside this prefix (32 = single hosts only).
     min_mitigation_prefix_len: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=32)
     preferred_upstream_id: Mapped[int | None] = mapped_column(
@@ -992,6 +1021,7 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "filter_backend": ("simulated", "Where local filtering rules go: 'simulated' (nothing changes on any router) or 'routeros' (Shield's filter account adds its own drop rules to the router's firewall raw table)."),
     "filter_max_rules": (50, "Hard ceiling on Shield's firewall drop rules across all routers."),
     "steering_backend": ("simulated", "Where steering rules go: 'simulated' (nothing changes on any router) or 'routeros' (Shield's filter account adds its own rules to the BGP output filter towards an upstream)."),
+    "scrubbing_backend": ("simulated", "Where scrubbing requests go: 'simulated' (no provider is called) or 'live' (Shield calls the provider's API)."),
     "steering_max_rules": (20, "Hard ceiling on Shield's steering rules across all upstreams."),
     "bgp_production_enabled": (False, "Production BGP sessions are configured and may carry blackholes (each only after its acceptance run passes). Changed only through its own switch."),
     "bgp_speaker": ("simulated", "Where blackhole routes are announced: 'simulated' (nothing leaves Shield) or 'frr' (Shield's FRR BGP speaker: staging sessions, and production sessions once production is switched on)."),

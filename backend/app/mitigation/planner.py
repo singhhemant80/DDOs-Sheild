@@ -31,8 +31,9 @@ LIVE_ROUTE_STATES = (RtbhStatus.PENDING_ANNOUNCE, RtbhStatus.ANNOUNCED, RtbhStat
 RTBH_STRATEGIES = (Strategy.RTBH_UPSTREAM.value, Strategy.RTBH_INTERNAL.value)
 FILTER_STRATEGIES = (Strategy.LOCAL_FILTER.value,)
 STEER_STRATEGIES = (Strategy.STEERING.value,)
+SCRUB_STRATEGIES = (Strategy.SCRUBBING.value,)
 RULE_STRATEGIES = FILTER_STRATEGIES + STEER_STRATEGIES   # carried out as rules on your routers
-AVAILABLE_STRATEGIES = RTBH_STRATEGIES + FILTER_STRATEGIES + STEER_STRATEGIES
+AVAILABLE_STRATEGIES = RTBH_STRATEGIES + FILTER_STRATEGIES + STEER_STRATEGIES + SCRUB_STRATEGIES
 
 
 @dataclass
@@ -49,6 +50,7 @@ class PlanRequest:
     router_ids: list[int] | None = None  # Phase 9 local filtering: None = every enabled router
     filters: list[dict] | None = None    # Phase 9: drop rules; None = derived from the incident's attack types
     steering: list[dict] | None = None   # Phase 9: [{upstream_id, mode, prepend, communities}]; None = suggested
+    scrubbing_provider_id: int | None = None   # Phase 9: None = the first verified provider
 
 
 class Plan(dict):
@@ -166,6 +168,8 @@ def _live_load(net) -> dict:
 
 
 def _backend_key(strategy: str) -> str:
+    if strategy in SCRUB_STRATEGIES:
+        return "scrubbing_backend"
     return "steering_backend" if strategy in STEER_STRATEGIES else "filter_backend"
 
 
@@ -180,7 +184,8 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
         return Plan(target=req.target, strategy=req.strategy, blocked=True, routes=[], impact={"statements": []},
                     checks=[{"level": "block", "code": "target_invalid", "message": str(e)}], simulation=True)
     steering = req.strategy in STEER_STRATEGIES
-    if steering:
+    scrubbing = req.strategy in SCRUB_STRATEGIES
+    if steering or scrubbing:
         from .steering import covering
         net = covering(str(net))
     target = str(net)
@@ -188,7 +193,7 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
         _check(checks, "block", "strategy", f"{req.strategy} is not available yet; blackholing (RTBH), local "
                                             "filtering and steering are.")
     filtering = req.strategy in FILTER_STRATEGIES
-    ruled = filtering or steering
+    ruled = filtering or steering or scrubbing
 
     # --- the protected prefix and the customer -----------------------------------------------
     from ..api.prefixes import eligibility_for  # shared with the eligibility API
@@ -201,6 +206,12 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
             _check(checks, "block", "prefix_disabled", f"Protected prefix {pp.prefix} is disabled.")
         if not pp.ownership_verified:
             _check(checks, "block", "ownership", f"Ownership of {pp.prefix} has not been verified.")
+        if scrubbing and not pp.scrubbing_allowed:
+            _check(checks, "block", "scrubbing_not_allowed", f"Diversion to a scrubbing provider is not enabled for "
+                                                             f"{pp.prefix} (Protected prefixes → Edit).")
+        if scrubbing:
+            _check(checks, "ok", "prefix", f"{target} is inside {pp.prefix}"
+                   + ("; ownership verified; scrubbing allowed." if pp.enabled and pp.ownership_verified and pp.scrubbing_allowed else "."))
         if steering and not pp.steering_allowed:
             _check(checks, "block", "steering_not_allowed", f"Steering is not enabled for {pp.prefix} (Protected prefixes → Edit).")
         if steering:
@@ -213,7 +224,7 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
             _check(checks, "block", "rtbh_not_allowed", f"Blackholing is not enabled for {pp.prefix}.")
         if filtering and net.prefixlen < (24 if net.version == 4 else 48):
             _check(checks, "block", "scope", f"Filters apply to a /24 (/48) or smaller, not {target}.")
-        elif steering:
+        elif steering or scrubbing:
             pass
         elif filtering:
             _check(checks, "ok", "prefix", f"{target} is inside {pp.prefix}; ownership verified; filtering allowed."
@@ -318,6 +329,9 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
     elif steering:
         from .steering import _steer_plan
         _steer_plan(db, req, net, target, routes, checks, impact)
+    elif scrubbing:
+        from .scrubbing import _scrub_plan
+        _scrub_plan(db, req, net, target, routes, checks, impact)
 
     # --- the BGP speaker ---------------------------------------------------------------------
     speaker = get_setting(db, "bgp_speaker", "simulated")
@@ -337,7 +351,7 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
         cast(target, CIDR) == MitigationAction.target)
     if exclude:
         conflict_q = conflict_q.where(~MitigationAction.id.in_(exclude))
-    for a in ([] if steering else db.execute(conflict_q).scalars()):
+    for a in ([] if steering or scrubbing else db.execute(conflict_q).scalars()):
         if filtering:
             if any(r.get("router_id") == a.router_id for r in routes):
                 _check(checks, "block", "duplicate", f"{target} already has a {a.state.value} filter on this router "
@@ -356,10 +370,10 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
                f"{target} was un-blackholed {mins} min ago. Re-blackholing within {cooldown // 60} min "
                + ("needs a person." if req.automatic else "can make the address flap; check the attack is really back."))
 
-    if net.num_addresses > 1 and not steering:
+    if net.num_addresses > 1 and not (steering or scrubbing):
         impact.append(f"{net.num_addresses} addresses are affected, not one.")
         _check(checks, "warn", "range", f"{target} covers {net.num_addresses} addresses.")
-    if pp is not None and routes and not steering:
+    if pp is not None and routes and not (steering or scrubbing):
         impact.append(f"No other address in {pp.prefix} is affected.")
     if cust and not ruled:
         impact.append(f"Customer {cust.customer_ref}{f' ({cust.customer_name})' if cust.customer_name else ''}, "
@@ -373,7 +387,8 @@ def build_plan(db: Session, req: PlanRequest, now: datetime | None = None) -> Pl
     return Plan(
         target=target, strategy=req.strategy, blocked=blocked, routes=routes, checks=checks,
         duration_seconds=duration, protected_prefix_id=pp.id if pp else None,
-        simulation=(get_setting(db, _backend_key(req.strategy), "simulated") != "routeros") if ruled else speaker != "frr",
+        simulation=(get_setting(db, _backend_key(req.strategy), "simulated") not in ("routeros", "live")) if ruled
+        else speaker != "frr",
         speaker=get_setting(db, _backend_key(req.strategy), "simulated") if ruled else speaker,
         acceptance_peer=req.acceptance_peer,
         impact={"statements": impact, "addresses": net.num_addresses, "live": _live_load(net),

@@ -17,7 +17,7 @@ from . import telemetry as tm
 from .changes import get_setting
 from .models import BgpNeighbor, ProtectedPrefix, Router, RouterState
 
-CURRENT = 8  # the phase this release completes
+CURRENT = 9  # the phase this release completes
 
 PHASES: list[dict] = [
     {"n": 1, "title": "Requirements and architecture",
@@ -49,14 +49,15 @@ PHASES: list[dict] = [
     {"n": 9, "title": "Selective steering, local filtering, scrubbing",
      "scope": "Selective upstream blackholing and steering, local filtering on the router, scrubbing-centre adapter.",
      "exit": "Each part: drops or diverts only the attack traffic, verified, reversible; nothing else on the router changes.",
-     "release": "0.9", "in_progress": True,
+     "release": "0.9",
      "parts": [
          {"title": "Local filtering on MikroTik (firewall raw drop rules)", "status": "done", "release": "0.9"},
          {"title": "Selective ISP steering (withhold / prepend / tag towards one upstream)", "status": "done", "release": "0.9.1"},
-         {"title": "Scrubbing-centre adapter", "status": "pending"},
+         {"title": "Scrubbing-centre adapter (provider API or manual)", "status": "done", "release": "0.9.2"},
      ],
      "verify": ["Run local filtering against a real CCR2004/CCR2116 (tested on the RouterOS protocol simulator)",
-                "Check steering on your router: the routing filter syntax and that BGP re-advertises after the rule changes"],
+                "Check steering on your router: the routing filter syntax and that BGP re-advertises after the rule changes",
+                "Test a scrubbing provider's API with a test prefix it agrees to divert (status request first)"],
      "blocked": "Designed from the parts of the specification available; its Phase 9 text is incomplete."},
     {"n": 10, "title": "Alerting, reporting and hardening",
      "scope": "Email, Telegram and webhook alerts, reports, hardening, production checklist.",

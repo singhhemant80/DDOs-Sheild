@@ -178,7 +178,7 @@ type Detail = Incident & {
   profile: { id: number; name: string; scope: string } | null;
   timeline: { at: string; kind: string; actor: string; detail: Record<string, any> }[];
   evidence: { observed_at: string; metric: string; value: number; threshold: number | null; provenance: string; details?: { unit?: string } }[];
-  eligibility: { protected_prefix: string | null; rtbh_allowed: boolean; steering_allowed: boolean; filtering_allowed: boolean; reasons: string[] } | null;
+  eligibility: { protected_prefix: string | null; rtbh_allowed: boolean; steering_allowed: boolean; filtering_allowed: boolean; scrubbing_allowed?: boolean; reasons: string[] } | null;
 };
 type Series = { available: boolean; reason?: string; step_seconds: number; from: number; to: number; resolution?: "1s" | "1m";
   points: { t: number; pps: number; bps: number; udp_pps?: number; syn_pps?: number; tcp_pps?: number; icmp_pps?: number }[] };
@@ -434,7 +434,8 @@ export function AttackDetail() {
               </div>
               {inc.eligibility.reasons.length > 0 && <ul className="list-disc pl-5 text-ink-2">{inc.eligibility.reasons.map((r) => <li key={r}>{r}</li>)}</ul>}
               <IncidentMitigation incidentId={inc.id} target={inc.target} eligible={inc.eligibility.rtbh_allowed}
-                filterEligible={inc.eligibility.filtering_allowed} steerEligible={inc.eligibility.steering_allowed} open={!!open} />
+                filterEligible={inc.eligibility.filtering_allowed} steerEligible={inc.eligibility.steering_allowed}
+                scrubEligible={!!inc.eligibility.scrubbing_allowed} open={!!open} />
             </div>
           ) : <p className="text-sm text-ink-2">The target is not inside a protected prefix, so no mitigation is possible.</p>}
         </Section>

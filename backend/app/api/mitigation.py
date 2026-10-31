@@ -51,6 +51,8 @@ class PlanIn(BaseModel):
     filters: list[dict] | None = Field(None, max_length=8)
     # steering only
     steering: list[dict] | None = Field(None, max_length=16)
+    # scrubbing only
+    scrubbing_provider_id: int | None = None
 
     def request(self, automatic: bool = False) -> PlanRequest:
         return PlanRequest(target=self.target, strategy=self.strategy,
@@ -62,7 +64,8 @@ class PlanIn(BaseModel):
                            filters=[{k: f.get(k) for k in ("protocol", "src_port", "dst_port", "fragment", "label")}
                                     for f in self.filters] if self.filters is not None else None,
                            steering=[{k: f.get(k) for k in ("upstream_id", "mode", "prepend", "communities")}
-                                     for f in self.steering] if self.steering is not None else None)
+                                     for f in self.steering] if self.steering is not None else None,
+                           scrubbing_provider_id=self.scrubbing_provider_id)
 
 
 class ReasonIn(BaseModel):
@@ -88,6 +91,7 @@ def _out(a: MitigationAction, ups: dict, users: dict) -> dict:
     o["upstream"] = ups.get(a.upstream_id)
     o["router_id"] = a.router_id
     o["router"] = ((a.plan or {}).get("route") or {}).get("router")
+    o["provider"] = ((a.plan or {}).get("route") or {}).get("provider")
     o["requested_by"] = users.get(o["requested_by_id"])
     o["approved_by"] = users.get(o["approved_by_id"])
     return o
@@ -328,6 +332,7 @@ def controller_status(_: Principal = Depends(require(Perm.VIEW)), db: Session = 
         "last_interlock": (st or {}).get("last_interlock") or [],
         "filter_backend": get_setting(db, "filter_backend", "simulated"),
         "steering_backend": get_setting(db, "steering_backend", "simulated"),
+        "scrubbing_backend": get_setting(db, "scrubbing_backend", "simulated"),
     }
 
 

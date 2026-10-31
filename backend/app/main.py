@@ -11,7 +11,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from . import __version__
 from . import telemetry
-from .api import attacks, auth, bgp, customers, devices, mitigation, prefixes, system, traffic, upstreams, users
+from .api import attacks, auth, bgp, customers, devices, mitigation, prefixes, scrubbing, system, traffic, upstreams, users
 from .config import get_settings
 from .db import session_factory
 
@@ -104,7 +104,7 @@ def create_app() -> FastAPI:
         log.exception("database error")
         return JSONResponse({"detail": "Database error"}, status_code=503)
 
-    for module in (system, auth, users, prefixes, devices, upstreams, bgp, customers, traffic, attacks, mitigation):
+    for module in (system, auth, users, prefixes, devices, upstreams, bgp, customers, traffic, attacks, mitigation, scrubbing):
         app.include_router(module.router, prefix=API_PREFIX)
     return app
 

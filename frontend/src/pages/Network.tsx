@@ -11,6 +11,7 @@ import { duration, EventTable, RouterList, type Peer, type RouterEvent } from ".
 type Prefix = {
   id: number; prefix: string; description: string | null; enabled: boolean; ownership_verified: boolean;
   ownership_evidence: string | null; rtbh_allowed: boolean; steering_allowed: boolean; filtering_allowed: boolean;
+  scrubbing_allowed?: boolean;
   min_mitigation_prefix_len: number; authorized_at: string | null;
 };
 type Eligibility = {
@@ -41,7 +42,8 @@ export function Prefixes() {
                 {r.rtbh_allowed && <Badge tone="signal">Blackhole</Badge>}
                 {r.steering_allowed && <Badge tone="signal">Upstream steering</Badge>}
                 {r.filtering_allowed && <Badge tone="signal">Filtering</Badge>}
-                {!r.rtbh_allowed && !r.steering_allowed && !r.filtering_allowed && <span className="text-ink-3">None</span>}
+                {r.scrubbing_allowed && <Badge tone="signal">Scrubbing</Badge>}
+                {!r.rtbh_allowed && !r.steering_allowed && !r.filtering_allowed && !r.scrubbing_allowed && <span className="text-ink-3">None</span>}
               </div>) },
             { key: "s", header: "Narrowest target", render: (r) => r.min_mitigation_prefix_len === 32 || r.min_mitigation_prefix_len === 128
                 ? "Single addresses only" : <span className="text-warn">Up to /{r.min_mitigation_prefix_len}</span> },
@@ -59,7 +61,7 @@ function PrefixDialog({ open, prefix, onClose, onSaved }: { open: boolean; prefi
     prefix: prefix?.prefix ?? "", description: prefix?.description ?? "", enabled: prefix?.enabled ?? true,
     ownership_verified: prefix?.ownership_verified ?? false, ownership_evidence: prefix?.ownership_evidence ?? "",
     rtbh_allowed: prefix?.rtbh_allowed ?? false, steering_allowed: prefix?.steering_allowed ?? false,
-    filtering_allowed: prefix?.filtering_allowed ?? false,
+    filtering_allowed: prefix?.filtering_allowed ?? false, scrubbing_allowed: prefix?.scrubbing_allowed ?? false,
   }));
   const [err, setErr] = useState<string | null>(null);
   const set = (k: string, v: unknown) => setF((x) => ({ ...x, [k]: v }));
@@ -95,6 +97,7 @@ function PrefixDialog({ open, prefix, onClose, onSaved }: { open: boolean; prefi
           <Check disabled={!owned} label="Blackholing (drops all traffic to the target)" checked={f.rtbh_allowed} onChange={(v) => set("rtbh_allowed", v)} />
           <Check disabled={!owned} label="Steering via another upstream" checked={f.steering_allowed} onChange={(v) => set("steering_allowed", v)} />
           <Check disabled={!owned} label="Local filtering" checked={f.filtering_allowed} onChange={(v) => set("filtering_allowed", v)} />
+          <Check disabled={!owned} label="Diversion to a scrubbing provider" checked={f.scrubbing_allowed} onChange={(v) => set("scrubbing_allowed", v)} />
         </fieldset>
         <ErrorLine error={err} />
       </form>
@@ -237,10 +240,133 @@ export function Routers() {
               </div>) },
           ]} />
       </Section>
+      <ScrubbingProviders />
       {policyFor && <PolicyDialog up={policyFor} onClose={() => setPolicyFor(null)} onSaved={ups.reload} />}
       {editUp && <UpstreamDialog up={editUp === "new" ? null : editUp} routers={routers.data ?? []} existing={ups.data ?? []}
         onClose={() => setEditUp(null)} onSaved={ups.reload} />}
     </div>
+  );
+}
+
+// ================================================================ Scrubbing providers
+type Req = { url: string; method: string; body?: string | null; headers?: Record<string, string>; active_path?: string | null; active_value?: string | null };
+type Scrubber = { id: number; name: string; enabled: boolean; method: "api" | "manual"; config: { activate?: Req; deactivate?: Req; status?: Req; steps?: string };
+  auth_header: string | null; has_secret: boolean; documentation_ref: string | null; verified_at: string | null;
+  min_prefix_len: number; max_prefix_len: number; max_prefixes: number; notes: string | null };
+
+function ScrubbingProviders() {
+  const { can } = useAuth();
+  const list = useApi<Scrubber[]>("/scrubbing/providers");
+  const [edit, setEdit] = useState<Scrubber | "new" | null>(null);
+  return (
+    <Section title="Scrubbing providers" flush aside={can("config_network") && <Button onClick={() => setEdit("new")}><Plus size={16} /> Add provider</Button>}>
+      <Table rows={list.data ?? []} rowKey={(x) => String(x.id)} onRow={can("config_network") ? setEdit : undefined}
+        empty="None. Add an on-demand scrubbing service if you have a contract with one: Shield can then divert an attacked /24 to it."
+        cols={[
+          { key: "n", header: "Provider", render: (x) => <><div className="font-medium">{x.name}</div><div className="text-xs text-ink-3">{x.method === "api" ? "API" : "Manual"}{x.notes ? ` · ${x.notes}` : ""}</div></> },
+          { key: "l", header: "Diverts", render: (x) => `/${x.min_prefix_len}${x.max_prefix_len !== x.min_prefix_len ? `–/${x.max_prefix_len}` : ""}, up to ${x.max_prefixes}` },
+          { key: "v", header: "State", render: (x) => !x.enabled ? <Badge>Disabled</Badge> : x.verified_at ? <Badge tone="ok">Verified</Badge> : <Badge tone="warn">Needs verification</Badge> },
+        ]} />
+      {edit && <ScrubberDialog prov={edit === "new" ? null : edit} onClose={() => setEdit(null)} onSaved={list.reload} />}
+    </Section>
+  );
+}
+
+function ReqFields({ label, r, onChange, status = false }: { label: string; r: Req; onChange: (r: Req) => void; status?: boolean }) {
+  return (
+    <div className="space-y-2 rounded-[3px] border border-rule-soft p-2">
+      <div className="text-sm font-medium">{label}</div>
+      <div className="grid gap-2 sm:grid-cols-[110px_1fr]">
+        <Select value={r.method} onChange={(v) => onChange({ ...r, method: v })} options={["GET", "POST", "PUT", "DELETE", "PATCH"].map((m) => [m, m] as [string, string])} />
+        <Input className="font-mono text-xs" value={r.url} onChange={(e) => onChange({ ...r, url: e.target.value })} placeholder="https://api.provider.example/v1/divert/{prefix}" />
+      </div>
+      {!status && r.method !== "GET" && r.method !== "DELETE" && <Field label="Body (JSON template)" hint="Placeholders inside strings: {prefix}, {target}, {action_id}, {incident_id}">
+        <textarea className="h-16 w-full rounded-[3px] border border-rule bg-panel p-2 font-mono text-xs" value={r.body ?? ""}
+          onChange={(e) => onChange({ ...r, body: e.target.value })} placeholder='{"prefix": "{prefix}"}' /></Field>}
+      {status && <div className="grid gap-2 sm:grid-cols-2">
+        <Field label="Active when JSON field" hint="Dotted path, e.g. data.state"><Input value={r.active_path ?? ""} onChange={(e) => onChange({ ...r, active_path: e.target.value })} /></Field>
+        <Field label="equals"><Input value={r.active_value ?? ""} onChange={(e) => onChange({ ...r, active_value: e.target.value })} placeholder="active" /></Field>
+      </div>}
+    </div>
+  );
+}
+
+function ScrubberDialog({ prov, onClose, onSaved }: { prov: Scrubber | null; onClose: () => void; onSaved: () => void }) {
+  const empty = (method: string): Req => ({ url: "", method, body: null });
+  const [f, setF] = useState({
+    name: prov?.name ?? "", method: prov?.method ?? "api", enabled: prov?.enabled ?? true, auth_header: prov?.auth_header ?? "Authorization",
+    secret: "", documentation_ref: prov?.documentation_ref ?? "", notes: prov?.notes ?? "",
+    min: String(prov?.min_prefix_len ?? 24), max: String(prov?.max_prefix_len ?? 24), maxp: String(prov?.max_prefixes ?? 4),
+    activate: prov?.config.activate ?? empty("POST"), deactivate: prov?.config.deactivate ?? empty("DELETE"),
+    status: prov?.config.status ?? empty("GET"), steps: prov?.config.steps ?? "",
+  });
+  const [err, setErr] = useState<string | null>(null);
+  const [test, setTest] = useState<string | null>(null);
+  const set = (k: string, v: unknown) => setF((x) => ({ ...x, [k]: v }));
+  const config = () => f.method === "manual" ? { steps: f.steps }
+    : { activate: f.activate, deactivate: f.deactivate, ...(f.status.url ? { status: f.status } : {}) };
+  const save = async () => {
+    setErr(null);
+    const body = { enabled: f.enabled, config: config(), auth_header: f.auth_header || null, documentation_ref: f.documentation_ref || null,
+      notes: f.notes || null, min_prefix_len: Number(f.min), max_prefix_len: Number(f.max), max_prefixes: Number(f.maxp),
+      ...(f.secret ? { secret: f.secret } : {}) };
+    try {
+      if (prov) await api(`/scrubbing/providers/${prov.id}`, { method: "PATCH", body });
+      else await api("/scrubbing/providers", { method: "POST", body: { ...body, name: f.name, method: f.method } });
+      onSaved(); onClose();
+    } catch (e: any) { setErr(e.message); }
+  };
+  const act = async (path: string) => {
+    setErr(null);
+    try { await api(`/scrubbing/providers/${prov!.id}/${path}`, { method: path === "delete" ? "DELETE" : "POST" }); onSaved(); onClose(); }
+    catch (e: any) { setErr(e.message); }
+  };
+  const runTest = async () => {
+    setErr(null); setTest("…");
+    const pfx = window.prompt("Ask the provider about which protected prefix?", "") ?? "";
+    if (!pfx) { setTest(null); return; }
+    try {
+      const r = await api<{ ok: boolean; active?: boolean | null; error?: string }>(`/scrubbing/providers/${prov!.id}/test?prefix=${encodeURIComponent(pfx)}`, { method: "POST" });
+      setTest(r.ok ? `Status request worked: ${r.active ? "diverted" : "not diverted"}.` : `Failed: ${r.error}`);
+    } catch (e: any) { setTest(null); setErr(e.message); }
+  };
+  return (
+    <Dialog open title={prov ? `Edit ${prov.name}` : "Add a scrubbing provider"} onClose={onClose}
+      footer={<>
+        {prov && <Button variant="danger" className="mr-auto" onClick={async () => {
+          try { await api(`/scrubbing/providers/${prov.id}`, { method: "DELETE" }); onSaved(); onClose(); } catch (e: any) { setErr(e.message); } }}>Delete</Button>}
+        {prov?.method === "api" && prov.config.status && <Button onClick={runTest}>Test status request</Button>}
+        {prov && !prov.verified_at && <Button onClick={() => act("verify")}>Mark as verified</Button>}
+        <Button variant="quiet" onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save}>Save</Button></>}>
+      <Notice tone="warn">Take every value from the provider's own documentation. Shield calls only public HTTPS addresses, never follows
+        redirects, and stores the token encrypted. Changing anything except the name, notes or enabled state needs verifying again.</Notice>
+      {test && <Notice>{test}</Notice>}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Name"><Input value={f.name} disabled={!!prov} onChange={(e) => set("name", e.target.value)} /></Field>
+        <Field label="How diversion is triggered"><Select value={f.method} disabled={!!prov} onChange={(v) => set("method", v)}
+          options={[["api", "Provider API (Shield calls it)"], ["manual", "Manually (portal, phone)"]]} /></Field>
+      </div>
+      {f.method === "api" ? <>
+        <ReqFields label="Start diversion" r={f.activate} onChange={(r) => set("activate", r)} />
+        <ReqFields label="Stop diversion" r={f.deactivate} onChange={(r) => set("deactivate", r)} />
+        <ReqFields label="Status (optional, lets Shield confirm diversion is active)" r={f.status} status onChange={(r) => set("status", r)} />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Auth header"><Input value={f.auth_header} onChange={(e) => set("auth_header", e.target.value)} placeholder="Authorization" /></Field>
+          <Field label="Auth value (token)" hint={prov?.has_secret ? "Stored encrypted. Leave empty to keep." : "e.g. Bearer …; stored encrypted"}>
+            <Input type="password" autoComplete="new-password" value={f.secret} onChange={(e) => set("secret", e.target.value)} /></Field>
+        </div>
+      </> : <Field label="Steps for the operator" hint="Shown when a diversion is approved">
+        <textarea className="h-24 w-full rounded-[3px] border border-rule bg-panel p-2 text-sm" value={f.steps} onChange={(e) => set("steps", e.target.value)} /></Field>}
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Field label="Shortest prefix"><Input inputMode="numeric" value={f.min} onChange={(e) => set("min", e.target.value)} /></Field>
+        <Field label="Longest prefix"><Input inputMode="numeric" value={f.max} onChange={(e) => set("max", e.target.value)} /></Field>
+        <Field label="Max prefixes at once"><Input inputMode="numeric" value={f.maxp} onChange={(e) => set("maxp", e.target.value)} /></Field>
+      </div>
+      <Field label="Provider documentation" hint="URL or contract reference. Required before verification."><Input value={f.documentation_ref} onChange={(e) => set("documentation_ref", e.target.value)} /></Field>
+      <Field label="Return path" hint="How clean traffic comes back, e.g. GRE tunnel gre-scrub on edge-r1"><Input value={f.notes} onChange={(e) => set("notes", e.target.value)} /></Field>
+      <Check label="Enabled" checked={f.enabled} onChange={(v) => set("enabled", v)} />
+      <ErrorLine error={err} />
+    </Dialog>
   );
 }
 

@@ -46,6 +46,7 @@ from ..models import (
 from . import service
 from .acceptance import AcceptanceRunner, run_interlock
 from . import filtering as flt
+from . import scrubbing as scr
 from . import steering as stg
 from .planner import AVAILABLE_STRATEGIES, PlanRequest, build_plan
 from .speaker import Route, SimulatedSpeaker, Speaker, SpeakerError, SpeakerRefused, make_speaker
@@ -85,7 +86,8 @@ KINDS = {
 class Controller:
     def __init__(self, rds: redis.Redis | None = None, sessions: Callable[[], Session] | None = None,
                  speaker: Speaker | None = None, clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-                 filters: "flt.FilterBackend | None" = None, steers: "flt.FilterBackend | None" = None):
+                 filters: "flt.FilterBackend | None" = None, steers: "flt.FilterBackend | None" = None,
+                 scrubs: "scr.ScrubbingBackend | None" = None):
         s = get_settings()
         self.rds = rds or redis.Redis.from_url(s.redis_url, socket_timeout=2, socket_connect_timeout=2,
                                                decode_responses=True)
@@ -107,6 +109,9 @@ class Controller:
         self.steers: flt.FilterBackend = steers or stg.SimulatedSteering(self.rds)
         self.last_filter_reconcile: dict = {}
         self.last_steer_reconcile: dict = {}
+        self._fixed_scrubs = scrubs is not None
+        self.scrubs: scr.ScrubbingBackend = scrubs or scr.SimulatedScrubbing(self.rds)
+        self.last_scrub_reconcile: dict = {}
 
     # ------------------------------------------------------------ leadership
     def acquire_lock(self) -> bool:
@@ -145,6 +150,11 @@ class Controller:
         with self.sessions() as db:
             want_f = get_setting(db, "filter_backend", "simulated")
             want_s = get_setting(db, "steering_backend", "simulated")
+            want_x = get_setting(db, "scrubbing_backend", "simulated")
+        if not self._fixed_scrubs and want_x != self.scrubs.name:
+            log.warning("switching scrubbing backend from %s to %s", self.scrubs.name, want_x)
+            self.scrubs = scr.make_backend(want_x, self.rds)
+            changed = True
         if not self._fixed_filters and want_f != self.filters.name:
             log.warning("switching filter backend from %s to %s", self.filters.name, want_f)
             self.filters = flt.make_backend(want_f, self.rds)
@@ -324,6 +334,8 @@ class Controller:
         kind = self._rule_kind(aid)
         if kind is not None:
             return self._execute_rules(aid, kind)
+        if self._is_scrub(aid):
+            return self._execute_scrub(aid)
         with self.sessions() as db, db.begin():
             a = self._lock(db, aid, S.APPROVED, S.EXECUTING)
             if a is None:
@@ -434,6 +446,8 @@ class Controller:
         rk = self._rule_kind(aid)
         if rk is not None:
             return self._remove_rules(aid, frm, to, kind, rk)
+        if self._is_scrub(aid):
+            return self._remove_scrub(aid, frm, to, kind)
         with self.sessions() as db:
             a = db.get(MitigationAction, aid)
             if a is None or a.state != frm:
@@ -699,6 +713,153 @@ class Controller:
             log.warning("%s reconcile: %s", kind.name, out)
         return out
 
+    # ------------------------------------------------------------ scrubbing (Phase 9 part 3)
+    def _is_scrub(self, aid: uuid.UUID) -> bool:
+        with self.sessions() as db:
+            a = db.get(MitigationAction, aid)
+            return a is not None and a.strategy == Strategy.SCRUBBING
+
+    def _diversion(self, db: Session, a: MitigationAction):
+        from ..models import ScrubbingProvider
+        r = (a.plan or {}).get("route") or {}
+        p = db.get(ScrubbingProvider, r.get("scrubbing_provider_id")) if r.get("scrubbing_provider_id") else None
+        if p is not None:
+            db.expunge(p)
+        d = scr.Diversion(provider_id=r.get("scrubbing_provider_id") or 0, prefix=str(a.target), target=str(a.target),
+                          action_id=str(a.id), incident_id=str(a.incident_id) if a.incident_id else None)
+        return p, d
+
+    def _scrub_row(self, db: Session, a: MitigationAction, d) -> FilterRule:
+        row = db.execute(select(FilterRule).where(FilterRule.action_id == a.id, FilterRule.status.notin_(("removed", "failed")))
+                         ).scalars().first()
+        if row is None:
+            row = FilterRule(action_id=a.id, router_id=None, comment=flt.comment(str(a.id), 0), match=d.to_dict(),
+                             status="pending", backend=self.scrubs.name, kind="scrub")
+            db.add(row)
+            db.flush()
+        return row
+
+    def _execute_scrub(self, aid: uuid.UUID) -> int:
+        be = self.scrubs
+        with self.sessions() as db, db.begin():
+            a = self._lock(db, aid, S.APPROVED, S.EXECUTING)
+            if a is None:
+                return 0
+            if a.state == S.APPROVED:
+                if not self._start(db, a):
+                    return 0
+                transition(db, a, S.EXECUTING, ACTOR, "executing", backend=be.name)
+            prov, d = self._diversion(db, a)
+            self._scrub_row(db, a, d)
+            started, timeout = a.started_at, a.timeout_seconds
+        err, refused, result, active = None, False, {}, None
+        try:
+            if prov is None or not prov.enabled:
+                raise SpeakerRefused("the scrubbing provider of this action no longer exists or is disabled")
+            result = be.call(prov, "activate", d)
+            active = be.is_active(prov, d)
+            if active is False:
+                err = f"{prov.name} accepted the request but does not report the diversion as active"
+        except SpeakerError as e:
+            err, refused = str(e), isinstance(e, SpeakerRefused)
+        with self.sessions() as db, db.begin():
+            a = self._lock(db, aid, S.EXECUTING, S.WITHDRAWING)
+            if a is None:
+                return 0
+            now = self.clock()
+            row = self._scrub_row(db, a, d)
+            if err is None:
+                row.status, row.backend = "active", be.name
+                row.added_at, row.verified_at = row.added_at or now, now
+                row.last_result = {"ok": True, "at": now.isoformat(), **result, "confirmed": active}
+                if a.state == S.WITHDRAWING:
+                    return 1
+                self._activate(db, a, now, provider=prov.name, simulation=be.name == "simulated", backend=be.name,
+                               confirmed=active, manual=prov.method == "manual")
+                audit.record(db, audit.SYSTEM_ACTOR, "mitigation.scrub_divert", "mitigation_action", a.id,
+                             after={"provider": prov.name, "prefix": d.prefix, "backend": be.name, "http": result.get("status")})
+                self.next_try.pop(aid, None)
+                return 1
+            a.attempts += 1
+            a.error = err
+            row.last_result = {"ok": False, "at": now.isoformat(), "error": err}
+            record(db, a, None, ACTOR, "announce_failed", error=err, attempt=a.attempts)
+            if a.state == S.EXECUTING and (refused or (now - started).total_seconds() >= timeout):
+                a.completed_at = now
+                transition(db, a, S.FAILED, ACTOR, "failed", error=err if refused else f"gave up after {timeout} s: {err}")
+            self._later(aid)
+            return 0
+
+    def _remove_scrub(self, aid: uuid.UUID, frm: S, to: S, verb: str) -> int:
+        be = self.scrubs
+        with self.sessions() as db:
+            a = db.get(MitigationAction, aid)
+            if a is None or a.state != frm:
+                return 0
+            prov, d = self._diversion(db, a)
+            had = db.execute(select(FilterRule).where(FilterRule.action_id == a.id)).first()
+        err = None
+        if prov is not None and (had or frm == S.WITHDRAWING):
+            try:
+                be.call(prov, "deactivate", d)
+                if be.is_active(prov, d) is True:
+                    err = f"{prov.name} still reports the diversion as active"
+            except SpeakerRefused as e:
+                if frm != S.FAILED:   # a failed activation may have nothing to stop
+                    err = str(e)
+            except SpeakerError as e:
+                err = str(e)
+        with self.sessions() as db, db.begin():
+            a = self._lock(db, aid, frm)
+            if a is None:
+                return 0
+            now = self.clock()
+            rows = db.execute(select(FilterRule).where(FilterRule.action_id == a.id,
+                                                       FilterRule.status.notin_(("removed",)))).scalars().all()
+            if err:
+                a.error = err
+                record(db, a, None, ACTOR, f"{verb}_failed", error=err)
+                for r in rows:
+                    r.status = "removing"
+                self._later(aid)
+                return 0
+            for r in rows:
+                r.status, r.removed_at = ("removed", now)
+            a.completed_at = now
+            transition(db, a, to, ACTOR, verb, reason=a.withdraw_reason or a.error)
+            audit.record(db, audit.SYSTEM_ACTOR, f"mitigation.scrub_{'stop' if to == S.WITHDRAWN else 'rollback'}",
+                         "mitigation_action", a.id, after={"provider": prov.name if prov else None, "prefix": d.prefix,
+                                                           "reason": a.withdraw_reason or a.error})
+            self.next_try.pop(aid, None)
+            return 1
+
+    def reconcile_scrubbing(self) -> dict:
+        """Active diversions the provider no longer reports as active are requested again."""
+        be = self.scrubs
+        with self.sessions() as db:
+            acts = db.execute(select(MitigationAction).where(MitigationAction.state == S.ACTIVE,
+                                                             MitigationAction.strategy == Strategy.SCRUBBING)).scalars().all()
+            items = [(a.id, *self._diversion(db, a)) for a in acts]
+        renewed, errors, checked = [], [], 0
+        for aid, prov, d in items:
+            if prov is None:
+                continue
+            try:
+                st = be.is_active(prov, d)
+                checked += st is not None
+                if st is False:
+                    be.call(prov, "activate", d)
+                    renewed.append(d.prefix)
+                    self._note(aid, "reconciled_reannounced", route=f"scrub:{prov.id}|{d.prefix}",
+                               found=f"{prov.name} did not report the diversion as active")
+            except SpeakerError as e:
+                errors.append(f"{d.prefix}: {e}")
+        self.last_scrub_reconcile = {"at": self.clock().isoformat(), "ok": not errors, "backend": be.name,
+                                     "diversions": len(items), "checked": checked, "renewed": renewed, "errors": errors}
+        if renewed or errors:
+            log.warning("scrubbing reconcile: %s", self.last_scrub_reconcile)
+        return self.last_scrub_reconcile
+
     def reconcile_filters(self) -> dict:
         return self.reconcile_rules(KINDS[Strategy.LOCAL_FILTER])
 
@@ -707,7 +868,7 @@ class Controller:
 
     # ------------------------------------------------------------ 6. reconcile
     def reconcile(self) -> dict:
-        for f in (self.reconcile_filters, self.reconcile_steering):
+        for f in (self.reconcile_filters, self.reconcile_steering, self.reconcile_scrubbing):
             try:
                 f()
             except Exception:
@@ -725,7 +886,7 @@ class Controller:
         reannounced, withdrawn, errors = [], [], []
         with self.sessions() as db:
             active = db.execute(select(MitigationAction).where(MitigationAction.state == S.ACTIVE,
-                                                               MitigationAction.strategy.notin_(list(KINDS)))).scalars().all()
+                                                               MitigationAction.strategy.notin_([*KINDS, Strategy.SCRUBBING]))).scalars().all()
             desired = {_route_of(a).key: (a.id, _route_of(a)) for a in active}
             executing = {str(x) for x in db.execute(select(MitigationAction.id).where(
                 MitigationAction.state.in_([S.APPROVED, S.EXECUTING]))).scalars()}
@@ -789,7 +950,8 @@ class Controller:
                 "speaker_routes": rib, "last_reconcile": self.last_reconcile,
                 "last_interlock": self.last_interlock, "filter_backend": self.filters.name,
                 "last_filter_reconcile": self.last_filter_reconcile, "steering_backend": self.steers.name,
-                "last_steer_reconcile": self.last_steer_reconcile}), ex=30)
+                "last_steer_reconcile": self.last_steer_reconcile, "scrubbing_backend": self.scrubs.name,
+                "last_scrub_reconcile": self.last_scrub_reconcile}), ex=30)
         except redis.RedisError:
             pass
 

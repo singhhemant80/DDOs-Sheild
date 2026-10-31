@@ -94,7 +94,9 @@ def record(db: Session, a: MitigationAction, to: S | None, actor: str, kind: str
                                  actor=actor[:64], detail={"kind": kind or (to.value if to else "note"), **detail}))
     _pending(db).append({"type": "mitigation", "event": kind or (to.value if to else "note"), "actor": actor,
                          "action": {"id": str(a.id), "target": str(a.target), "state": (to or a.state).value,
-                                    "upstream_id": a.upstream_id, "incident_id": str(a.incident_id) if a.incident_id else None},
+                                    "upstream_id": a.upstream_id, "incident_id": str(a.incident_id) if a.incident_id else None,
+                                    "strategy": a.strategy.value if a.strategy else None, "dry_run": a.dry_run,
+                                    "description": ((a.plan or {}).get("route") or {}).get("description")},
                          "detail": detail})
 
 
