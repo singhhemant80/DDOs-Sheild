@@ -372,3 +372,5 @@ def test_receive_filter_routeros(client, engineer, lab):
     assert r.status_code == 200
     assert 'dst in 163.5.191.0/24 && dst-len >= 32 && bgp-communities includes 65535:666' in r.text
     assert 'chain=shield-rtbh-in rule="reject"' in r.text and "remote.address=127.0.0.41" in r.text
+    conn = next(ln for ln in r.text.splitlines() if ln.startswith("add name=shield-rtbh "))
+    assert " as=65020 " in conn and " remote.as=" in conn and " multihop=yes " in conn  # the router's own AS, not the template's

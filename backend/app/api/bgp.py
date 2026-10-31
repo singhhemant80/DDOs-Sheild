@@ -158,6 +158,7 @@ def receive_filter(db: Session, fmt: str, shield_address: str | None = None) -> 
     shield = db.execute(select(BgpNeighbor).where(BgpNeighbor.router_id.is_(None),
                                                   BgpNeighbor.purpose == BgpPurpose.RTBH_SIGNAL)).scalars().first()
     asn = shield.local_asn if shield else "<shield-asn>"
+    router_asn = shield.remote_asn if shield else "<your-asn>"
     addr = shield_address or (str(shield.local_address) if shield and shield.local_address else "<shield-address>")
     nets = [(ipaddress.ip_network(str(p.prefix)), p.min_mitigation_prefix_len) for p in rows]
     if fmt == "frr":
@@ -191,7 +192,9 @@ def receive_filter(db: Session, fmt: str, shield_address: str | None = None) -> 
     out += ['add chain=shield-rtbh-in rule="reject" comment="Shield: everything else"',
             'add chain=shield-rtbh-out rule="reject" comment="Shield: send nothing to Shield"',
             "/routing/bgp/connection",
-            f"add name=shield-rtbh remote.address={addr} remote.as={asn} local.role=ibgp "
+            # as= is required: without it RouterOS takes the default template's AS (65530) and the
+            # iBGP session never comes up. multihop=yes: Shield is often not on a directly connected subnet.
+            f"add name=shield-rtbh as={router_asn} remote.address={addr} remote.as={asn} local.role=ibgp multihop=yes "
             "input.filter=shield-rtbh-in output.filter-chain=shield-rtbh-out input.limit-process-routes-ipv4=100 "
             'comment="Crapplet Shield blackhole signalling"']
     return "\n".join(out) + "\n"

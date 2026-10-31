@@ -4,7 +4,7 @@ On-premises DDoS detection and mitigation platform for hosting providers, ISPs a
 data centres: flow-based detection, BGP RTBH (upstream and internal), MikroTik
 RouterOS v7 integration, multi-upstream steering, and an operator dashboard.
 
-> **Status: all 10 phases done (v1.0.0).** Live traffic (NetFlow v9 / IPFIX / sFlow collector, ClickHouse
+> **Status: all 10 phases done (v1.0.1).** Live traffic (NetFlow v9 / IPFIX / sFlow collector, ClickHouse
 > history), attack detection, read-only MikroTik RouterOS integration, the blackhole (RTBH) workflow
 > (preview, approval, execution, verification, withdrawal, restart reconciliation), Shield's own FRR
 > BGP speaker with outbound filters and a generated router import filter, and **controlled live
