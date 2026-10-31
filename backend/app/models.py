@@ -932,6 +932,7 @@ class Notification(Base):
 
     __table_args__ = (
         Index("ix_notifications_dedup", "channel_id", "dedup_key", "created_at"),
+        Index("ix_notifications_status", "status"),
         CheckConstraint("status IN ('pending','sent','suppressed','failed')", name="ck_notifications_status"),
     )
 
@@ -1021,6 +1022,7 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "filter_backend": ("simulated", "Where local filtering rules go: 'simulated' (nothing changes on any router) or 'routeros' (Shield's filter account adds its own drop rules to the router's firewall raw table)."),
     "filter_max_rules": (50, "Hard ceiling on Shield's firewall drop rules across all routers."),
     "steering_backend": ("simulated", "Where steering rules go: 'simulated' (nothing changes on any router) or 'routeros' (Shield's filter account adds its own rules to the BGP output filter towards an upstream)."),
+    "dashboard_url": ("", "Address of this dashboard (e.g. https://shield.example.net), used for links in alerts."),
     "scrubbing_backend": ("simulated", "Where scrubbing requests go: 'simulated' (no provider is called) or 'live' (Shield calls the provider's API)."),
     "steering_max_rules": (20, "Hard ceiling on Shield's steering rules across all upstreams."),
     "bgp_production_enabled": (False, "Production BGP sessions are configured and may carry blackholes (each only after its acceptance run passes). Changed only through its own switch."),

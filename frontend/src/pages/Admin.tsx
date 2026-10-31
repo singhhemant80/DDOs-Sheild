@@ -369,7 +369,9 @@ const COMPONENTS: [string, string, string][] = [
   ["api", "Management API", ""], ["database", "PostgreSQL", "Configuration, users, audit"],
   ["redis", "Redis", "Live feed"], ["clickhouse", "ClickHouse", "Traffic history"],
   ["collector", "Flow collector", "NetFlow, IPFIX, sFlow"], ["detector", "Detection engine", "Attack detection and incidents"],
-  ["mikrotik_adapter", "MikroTik poller", "Read-only router status"], ["mitigator", "Mitigation controller", "Simulation mode: nothing is announced"],
+  ["mikrotik_adapter", "MikroTik poller", "Read-only router status"],
+  ["mitigator", "Mitigation controller", "Blackholes, filters, steering, scrubbing (each simulated until switched on)"],
+  ["notifier", "Alerts", "E-mail, Telegram and webhook notifications"],
 ];
 
 export function HealthPage() {

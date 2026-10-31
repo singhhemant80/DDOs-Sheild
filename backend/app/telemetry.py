@@ -145,7 +145,7 @@ def interfaces() -> list[dict]:
     best: dict[tuple, dict] = {}
     for r in out:
         key = (r.get("agent"), r.get("if_name") or f"#{r.get('if_index')}")
-        score = (r["provenance"] == "unavailable", rank.get(r.get("source"), 9))
+        score = (r.get("provenance") == "unavailable", rank.get(r.get("source"), 9))
         if key not in best or score < best[key][0]:
             best[key] = (score, r)
     out = [r for _, r in best.values()]

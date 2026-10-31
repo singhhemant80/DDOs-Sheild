@@ -27,4 +27,10 @@ fi
 
 sha256sum "$out" > "$out.sha256"
 find "$BACKUP_DIR" -name 'shield-*.dump*' -mtime +"$KEEP_DAYS" -delete
+# Tell the dashboard (Production readiness) when the last good backup was made. Best effort.
+STATUS=${STATUS_FILE:-/var/lib/crapplet-shield/last-backup}
+if [ -w "$STATUS" ] || [ -w "$(dirname "$STATUS")" ]; then
+  printf '{"at": "%s", "file": "%s", "bytes": %s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(basename "$out")" \
+    "$(stat -c %s "$out")" > "$STATUS" 2>/dev/null || true
+fi
 echo "backup written: $out"

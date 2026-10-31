@@ -2,7 +2,7 @@ import { Component, useState, type ReactNode } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   Activity, BarChart3, Bell, Cable, ClipboardList, Gauge, HeartPulse, History, LogOut, Menu, Moon, Network,
-  Map as MapIcon, OctagonX, Router as RouterIcon, Settings, ShieldAlert, ShieldBan, Sun, Swords, Users, Waypoints, Globe2,
+  FileText, Map as MapIcon, OctagonX, ShieldCheck, Router as RouterIcon, Settings, ShieldAlert, ShieldBan, Sun, Swords, Users, Waypoints, Globe2,
 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { api } from "../lib/api";
@@ -26,7 +26,8 @@ export const NAV: { group: string; items: Item[] }[] = [
   { group: "Mitigate", items: [
     { to: "/mitigation", label: "Mitigation center", icon: <Swords size={17} /> },
     { to: "/rtbh", label: "Blackhole routes", icon: <ShieldBan size={17} /> },
-    { to: "/alerts", label: "Alerts", icon: <Bell size={17} />, phase: 10 },
+    { to: "/alerts", label: "Alerts", icon: <Bell size={17} /> },
+    { to: "/reports", label: "Reports", icon: <FileText size={17} /> },
   ] },
   { group: "Network", items: [
     { to: "/prefixes", label: "Protected prefixes", icon: <Globe2 size={17} /> },
@@ -40,6 +41,7 @@ export const NAV: { group: string; items: Item[] }[] = [
     { to: "/settings", label: "Settings", icon: <Settings size={17} /> },
     { to: "/audit", label: "Audit log", icon: <ClipboardList size={17} /> },
     { to: "/health", label: "System health", icon: <HeartPulse size={17} /> },
+    { to: "/readiness", label: "Production readiness", icon: <ShieldCheck size={17} /> },
     { to: "/roadmap", label: "Roadmap", icon: <MapIcon size={17} /> },
   ] },
 ];

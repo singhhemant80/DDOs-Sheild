@@ -247,8 +247,10 @@ install -m 0644 "$PREFIX"/deploy/systemd/*.service "$PREFIX"/deploy/systemd/*.ti
 install -d -o postgres -g postgres -m 0700 /var/backups/crapplet-shield
 systemctl daemon-reload
 install -d -o shield -g shield -m 0755 /var/lib/crapplet-shield
-systemctl enable shield-api.service shield-detector.service shield-mikrotik.service shield-mitigator.service shield-maintenance.timer shield-backup.timer shield-asn-update.timer >/dev/null 2>&1
-systemctl restart shield-api.service shield-detector.service shield-mikrotik.service shield-mitigator.service
+# Written by the backup job (postgres), read by the dashboard's readiness checks.
+[ -e /var/lib/crapplet-shield/last-backup ] || install -o postgres -g shield -m 0644 /dev/null /var/lib/crapplet-shield/last-backup
+systemctl enable shield-api.service shield-detector.service shield-mikrotik.service shield-mitigator.service shield-notifier.service shield-maintenance.timer shield-backup.timer shield-asn-update.timer >/dev/null 2>&1
+systemctl restart shield-api.service shield-detector.service shield-mikrotik.service shield-mitigator.service shield-notifier.service
 systemctl start shield-maintenance.timer shield-backup.timer shield-asn-update.timer
 # IP-to-ASN table for naming attack sources (refreshed daily by the timer). Not fatal if offline.
 if [ ! -s /var/lib/crapplet-shield/ip2asn-combined.tsv.gz ]; then

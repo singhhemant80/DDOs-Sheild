@@ -17,7 +17,7 @@ from . import telemetry as tm
 from .changes import get_setting
 from .models import BgpNeighbor, ProtectedPrefix, Router, RouterState
 
-CURRENT = 9  # the phase this release completes
+CURRENT = 10  # the phase this release completes
 
 PHASES: list[dict] = [
     {"n": 1, "title": "Requirements and architecture",
@@ -60,8 +60,11 @@ PHASES: list[dict] = [
                 "Test a scrubbing provider's API with a test prefix it agrees to divert (status request first)"],
      "blocked": "Designed from the parts of the specification available; its Phase 9 text is incomplete."},
     {"n": 10, "title": "Alerting, reporting and hardening",
-     "scope": "Email, Telegram and webhook alerts, reports, hardening, production checklist.",
-     "exit": "To be defined with the rest of the specification.", "release": None},
+     "scope": "E-mail, Telegram and webhook alerts with de-duplication and escalation, daily/weekly reports and CSV export, "
+              "hardening and production-readiness checks.",
+     "exit": "Every alert type reaches a test channel; reports match the incident history; readiness checks list no problems.",
+     "release": "1.0",
+     "verify": ["Send a test message to every alert channel and check it arrives (Alerts → Send test)"]},
 ]
 
 
@@ -136,6 +139,10 @@ def checklist(db: Session) -> list[dict]:
     add("acceptance", "Acceptance run passed on every production session",
         production and all(n.acceptance_passed_at for n in production),
         "BGP sessions → Acceptance run, with an unused address in a protected prefix.", "/bgp", 8)
+    from .models import NotificationChannel
+    has_alerts = db.execute(select(NotificationChannel.id).where(NotificationChannel.enabled)).first() is not None
+    add("alerts", "Alert channel set up (e-mail, Telegram or webhook)", has_alerts,
+        "Alerts → Add channel, then Send test.", "/alerts", 10)
     fr = db.execute(select(Router).where(Router.enabled.is_(True), Router.filter_password_enc.is_not(None))).first()
     add("filter", "Local filtering on the router (optional)",
         fr is not None and get_setting(db, "filter_backend", "simulated") == "routeros",

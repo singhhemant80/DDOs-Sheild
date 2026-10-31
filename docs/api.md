@@ -1,4 +1,4 @@
-# API Guide (v1, Phase 8)
+# API Guide (v1)
 
 Interactive OpenAPI: `/api/v1/docs` (non-production, or `SHIELD_EXPOSE_DOCS=true`).
 Raw spec: `/api/v1/openapi.json`.
@@ -48,6 +48,8 @@ disabling a user revokes sessions immediately.
 | Local filtering | `POST /mitigation/preview` and `/mitigation/actions` with `strategy: "local_filter"`, optional `router_ids` and `filters` (`[{"protocol": "udp", "src_port": 123}]`; derived from the incident when omitted), `GET /mitigation/filters`, `POST /routers/{id}/filter-test`; router PATCH takes `filter_username` / `filter_password` (write-only, `""` clears) | Network engineer |
 | Steering | `POST /mitigation/preview` and `/mitigation/actions` with `strategy: "steering"`, optional `steering: [{"upstream_id": 1, "mode": "withhold"|"prepend"|"communities", "prepend": 3, "communities": ["174:990"]}]` (suggested from DDoS-protected upstreams when omitted); `GET /mitigation/filters?kind=steer` | Network engineer |
 | Scrubbing | `GET/POST /scrubbing/providers`, `PATCH/DELETE /scrubbing/providers/{id}` (`secret` write-only), `POST …/{id}/test?prefix=` (status request only), `POST …/{id}/verify`; mitigation `strategy: "scrubbing"` with optional `scrubbing_provider_id` | Network engineer |
+| Alerts | `GET/POST /notifications/channels`, `PATCH/DELETE /notifications/channels/{id}` (`secret` write-only), `POST …/{id}/test`, `GET /notifications?limit=&status=&channel_id=`, `GET /notifications/event-types` | Admin (read: everyone) |
+| Reports | `GET /reports/summary?days=`, `GET /reports/incidents.csv?days=`, `GET /system/hardening` | read-only |
 | Mitigation policies | `GET/POST /mitigation/policies`, `PUT/DELETE /mitigation/policies/{id}` | Network engineer |
 | Detection | `GET/POST /detection/profiles`, `PUT/DELETE /detection/profiles/{id}`, `GET /detection/status` | Network engineer (profiles) |
 
@@ -108,7 +110,6 @@ Lowering it (e.g. to /24) is an explicit, audited decision.
 Blocked plans return `409` with `{"detail": {"message": "...", "checks": [{"level": "block", "code": "...", "message": "..."}]}}`.
 Live events: `{"type": "mitigation", "event": "proposed|approved|executing|active|withdrawn|failed|...", "action": {...}}`.
 
-## Coming in later phases
+## Later phases
 
-`/notifications` (phase 10); steering, filtering and scrubbing strategies (phase 9).
-The database tables for these already exist (see `backend/app/models.py`).
+Nothing: all ten phases are delivered.

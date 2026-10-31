@@ -3,9 +3,9 @@ API = "/api/v1"
 
 def test_roadmap_reports_phases_and_checklist(client, engineer):
     r = client.get(f"{API}/system/roadmap", headers=engineer).json()
-    assert r["current"] == 9 and r["total"] == 10
+    assert r["current"] == 10 and r["total"] == 10
     st = {p["n"]: p["status"] for p in r["phases"]}
-    assert st[8] == "done" and st[9] == "done" and st[10] == "next"
+    assert all(v == "done" for v in st.values())
     p9 = next(p for p in r["phases"] if p["n"] == 9)
     assert [x["status"] for x in p9["parts"]] == ["done", "done", "done"]
     keys = {c["key"]: c for c in r["checklist"]}

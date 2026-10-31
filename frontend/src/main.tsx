@@ -11,6 +11,8 @@ import { Bgp, Customers, Prefixes, Routers } from "./pages/Network";
 import { AuditLog, HealthPage, SettingsPage, Upcoming, Users } from "./pages/Admin";
 import { ActiveAttacks, AttackDetail, AttackHistory } from "./pages/Attacks";
 import { Roadmap } from "./pages/Roadmap";
+import { AlertsPage } from "./pages/Alerts";
+import { ReadinessPage, ReportsPage } from "./pages/Reports";
 import { LiveProvider } from "./lib/live";
 import { RouterDetail, Topology } from "./pages/Routers";
 import { ActionDetail, BlackholeRoutes, MitigationCenter, Policies } from "./pages/Mitigation";
@@ -32,9 +34,9 @@ function App() {
         <Route path="mitigation/policies" element={<Policies />} />
         <Route path="mitigation/:id" element={<ActionDetail />} />
         <Route path="rtbh" element={<BlackholeRoutes />} />
-        <Route path="alerts" element={<Upcoming title="Alerts" phase={10}>
-          <p>Email, Telegram and webhook notifications for attacks, mitigation changes, BGP session loss and saturated links, with de-duplication and escalation.</p>
-        </Upcoming>} />
+        <Route path="alerts" element={<AlertsPage />} />
+        <Route path="reports" element={<ReportsPage />} />
+        <Route path="readiness" element={<ReadinessPage />} />
         <Route path="topology" element={<Topology />} />
         <Route path="prefixes" element={<Prefixes />} />
         <Route path="customers" element={<Customers />} />

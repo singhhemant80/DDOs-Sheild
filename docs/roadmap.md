@@ -11,13 +11,20 @@
 | 7 | Staging BGP with FRR, route filters, approval gates | Lab router accepts only authorised /32s; unauthorised and malformed requests rejected | **Done** with FRR lab routers (docs/bgp.md); MikroTik filter check pending |
 | 8 | Controlled live mitigation, rollback, verification | Acceptance tests prove unrelated prefixes unaffected | **Done** with FRR lab routers (docs/production.md); first production run is on your network |
 | 9 | Selective ISP steering, local filtering, scrubbing adapter | Each part drops or diverts only attack traffic, verified and reversible | **Done**: local filtering (v0.9.0, docs/local-filtering.md), steering (v0.9.1, docs/steering.md), scrubbing adapter (v0.9.2, docs/scrubbing.md) |
-| 10 | Alerting, reporting, hardening, production checklist | | **Next** |
+| 10 | Alerting, reporting, hardening, production checklist | Every alert type reaches a test channel; reports match the incident history; readiness checks list no problems | **Done** (v1.0.0; docs/alerting.md, docs/hardening.md) |
 
 > Note: the master specification document was truncated partway through Phase 9; Phase 9's
 > remaining text and any Phase 10 definition should be supplied before that work starts.
 
 The dashboard shows the same table live on the **Roadmap** page (and a progress card in the
 sidebar), together with the go-live steps still open on your installation.
+
+## Phase 10 notes
+
+- Like Phase 9, designed from the available parts of the specification.
+- Alerts: e-mail, Telegram, webhooks; severity and event filters, quiet periods, escalation of
+  unacknowledged attacks, daily/weekly summaries (`shield-notifier.service`).
+- Reports with CSV export; Production readiness page with hardening checks.
 
 ## Phase 9 notes
 

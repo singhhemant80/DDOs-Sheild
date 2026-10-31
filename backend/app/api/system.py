@@ -50,6 +50,7 @@ def health_details(_: Principal = Depends(require(Perm.VIEW)), db: Session = Dep
             "detector": _detector_state(),
             "mikrotik_adapter": _mikrotik_state(db),
             "mitigator": _mitigator_state(),
+            "notifier": _notifier_state(),
         },
     }
 
@@ -83,6 +84,17 @@ def _mikrotik_state(db: Session) -> str:
     if not raw:
         return "down"
     return "degraded" if any(s == DeviceStatus.DOWN for s in polled) else "up"
+
+
+def _notifier_state() -> str:
+    try:
+        raw = tm.rds().get("shield:notifier:status")
+    except Exception:
+        return "down"
+    if not raw:
+        return "down"
+    import json
+    return "degraded" if json.loads(raw).get("failed") else "up"
 
 
 def _detector_state() -> str:
@@ -169,6 +181,11 @@ def _validate_setting(key: str, value):
             raise HTTPException(422, "bgp_speaker must be 'simulated' or 'frr'")
         if key in ("filter_backend", "steering_backend") and value not in ("simulated", "routeros"):
             raise HTTPException(422, f"{key} must be 'simulated' or 'routeros'")
+        if key == "dashboard_url" and value:
+            from urllib.parse import urlparse
+            u = urlparse(value)
+            if u.scheme not in ("https", "http") or not u.hostname or u.path not in ("", "/") or u.query:
+                raise HTTPException(422, "dashboard_url must look like https://shield.example.net")
         if key == "scrubbing_backend" and value not in ("simulated", "live"):
             raise HTTPException(422, "scrubbing_backend must be 'simulated' or 'live'")
         if key in ("bgp_router_id", "rtbh_discard_nexthop_v4", "rtbh_discard_nexthop_v6") and value:
