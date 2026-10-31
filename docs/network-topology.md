@@ -44,11 +44,15 @@ Prefix-wide RTBH (/24 or /23) requires an explicitly authorised policy.
 
 ### Internal signalling community scheme (Shield-owned, configurable)
 
+Standard communities are two 16-bit numbers, so a 4-byte AS such as 154950 cannot be the first
+half (`154950:666` is invalid; Shield refuses it). These routes never leave your network
+(`no-export`, iBGP only), so `65535:...` values are fine.
+
 | Community | Meaning | Router action |
 |---|---|---|
-| `154950:666` | Internal blackhole | Set next-hop to blackhole (`blackhole` route type in RouterOS v7) |
-| `154950:667` | Upstream RTBH request | Re-advertise to upstream(s) with that upstream's RTBH community, `no-export` |
-| `154950:700`/`701` | Steer via Upstream A/B | Prepend/withhold toward the other upstream per steering policy |
+| `65535:666` | Internal blackhole | Set next-hop to blackhole (`blackhole` route type in RouterOS v7) |
+| `65535:667` (example) | Upstream RTBH request | Re-advertise to upstream(s) with that upstream's RTBH community, `no-export` |
+| `65535:700`/`701` (example) | Steer via Upstream A/B | Prepend/withhold toward the other upstream per steering policy |
 
 `65535:666` (RFC 7999 BLACKHOLE) is used **only** if the specific upstream documents support for it.
 

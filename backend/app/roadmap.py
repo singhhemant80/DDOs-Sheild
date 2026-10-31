@@ -42,7 +42,7 @@ PHASES: list[dict] = [
     {"n": 7, "title": "Staging BGP with FRR",
      "scope": "Shield's own FRR speaker to lab routers, generated router import filters, approval gates.",
      "exit": "The lab router accepts only authorised /32s; unauthorised and malformed requests are rejected.", "release": "0.7",
-     "verify": ["Check the generated RouterOS import filter (set blackhole yes) on your RouterOS version"]},
+     "verify": ["Paste the generated router filter on your CCR2004 in Safe Mode (checked on RouterOS 7.25 CHR) and run the acceptance test"]},
     {"n": 8, "title": "Controlled live mitigation",
      "scope": "Production BGP sessions behind an MFA-protected switch, canary acceptance runs per peer, safety interlock, withdraw-all rollback.",
      "exit": "Acceptance tests prove unrelated prefixes are unaffected.", "release": "0.8"},

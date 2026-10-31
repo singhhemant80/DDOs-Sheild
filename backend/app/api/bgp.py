@@ -191,12 +191,20 @@ def receive_filter(db: Session, fmt: str, shield_address: str | None = None) -> 
                    f'{{ set blackhole yes; accept }}" comment="Shield: {net}"')
     out += ['add chain=shield-rtbh-in rule="reject" comment="Shield: everything else"',
             'add chain=shield-rtbh-out rule="reject" comment="Shield: send nothing to Shield"',
-            "/routing/bgp/connection",
-            # as= is required: without it RouterOS takes the default template's AS (65530) and the
-            # iBGP session never comes up. multihop=yes: Shield is often not on a directly connected subnet.
-            f"add name=shield-rtbh as={router_asn} remote.address={addr} remote.as={asn} local.role=ibgp multihop=yes "
+            "# RouterOS 7.20 and later: the session belongs to the router's existing BGP instance for",
+            f"# AS{router_asn} (the one its upstream sessions use). Checked on RouterOS 7.25.",
+            "{",
+            f":local inst [/routing/bgp/instance find where as={router_asn}]",
+            f':if ([:len $inst] = 0) do={{ :error "No BGP instance with AS {router_asn}: see /routing/bgp/instance/print" }}',
+            f"/routing/bgp/connection add name=shield-rtbh instance=[/routing/bgp/instance get ($inst->0) name] "
+            f"remote.address={addr} remote.as={asn} local.role=ibgp multihop=yes "
             "input.filter=shield-rtbh-in output.filter-chain=shield-rtbh-out input.limit-process-routes-ipv4=100 "
-            'comment="Crapplet Shield blackhole signalling"']
+            'comment="Crapplet Shield blackhole signalling"',
+            "}",
+            "# RouterOS 7.19 and earlier have no BGP instances; there use instead:",
+            f"# /routing/bgp/connection add name=shield-rtbh as={router_asn} remote.address={addr} remote.as={asn} "
+            "local.role=ibgp multihop=yes input.filter=shield-rtbh-in output.filter-chain=shield-rtbh-out "
+            'input.limit-process-routes-ipv4=100 comment="Crapplet Shield blackhole signalling"']
     return "\n".join(out) + "\n"
 
 

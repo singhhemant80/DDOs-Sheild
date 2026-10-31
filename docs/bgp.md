@@ -86,7 +86,17 @@ Lab run with the real collector, detector, controller and FRR (loopback only):
 | Shield's FRR killed and restarted empty | Route withdrawn, restored by reconciliation 13 s later |
 | Withdraw | Gone from the lab router |
 
-**Not yet verified on a MikroTik.** The RouterOS filter (`set blackhole yes` in a v7 routing filter)
-must be checked on your RouterOS version before relying on it. The test lab router is FRR.
+**Checked on RouterOS 7.25** (MikroTik CHR in QEMU, `lab/routeros` on the `lab/routeros-chr` branch,
+run by GitHub Actions): the generated filter and connection were pasted as generated, the session
+with an FRR announcing like Shield came up, and the router installed only the authorised /32
+(`163.5.191.250/32`, flags `AbB`: active, BGP, blackhole); the /24, an address outside protected
+space and a /32 without the community were all filtered. The removal commands left nothing behind.
+Findings that changed the generator:
+
+- RouterOS 7.20+ requires `instance=` on a BGP connection; the script now uses the router's existing
+  instance for its AS (and shows the pre-7.20 form as a comment).
+- The internal community must be a standard community; `154950:666` does not exist (4-byte AS).
+
+Still to confirm on your CCR2004: the same, on real hardware, in Safe Mode, with an unused address.
 
 Distribution FRR is used: 8.1 on Ubuntu 22.04, 8.4 on Ubuntu 24.04 (tests run on 8.4).

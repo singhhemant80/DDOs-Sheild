@@ -367,10 +367,21 @@ def test_upstream_route_carries_provider_communities(client, engineer, noc, admi
     assert "163.5.191.20/32" not in lab_routes()
 
 
+def test_internal_community_must_be_standard(client, admin):
+    put = lambda v: client.put("/api/v1/settings/internal_blackhole_community", json={"value": v}, headers=admin)
+    assert put("154950:666").status_code == 422      # 4-byte AS does not fit a standard community
+    assert put("154950:666:0").status_code == 422    # large: the router filter matches standard only
+    assert put("65535:666").status_code == 200
+
+
 def test_receive_filter_routeros(client, engineer, lab):
     r = client.get("/api/v1/bgp/receive-filter?format=routeros", headers=engineer)
     assert r.status_code == 200
     assert 'dst in 163.5.191.0/24 && dst-len >= 32 && bgp-communities includes 65535:666' in r.text
     assert 'chain=shield-rtbh-in rule="reject"' in r.text and "remote.address=127.0.0.41" in r.text
-    conn = next(ln for ln in r.text.splitlines() if ln.startswith("add name=shield-rtbh "))
-    assert " as=65020 " in conn and " remote.as=" in conn and " multihop=yes " in conn  # the router's own AS, not the template's
+    # RouterOS 7.20+: the connection joins the router's BGP instance for its own AS (else RouterOS
+    # refuses it: "missing value(s) of argument(s) instance"); checked on a RouterOS 7.25 CHR.
+    assert "[/routing/bgp/instance find where as=65020]" in r.text
+    conn = next(ln for ln in r.text.splitlines() if ln.startswith("/routing/bgp/connection add name=shield-rtbh "))
+    assert "instance=[" in conn and " remote.as=" in conn and " multihop=yes " in conn
+    assert "# /routing/bgp/connection add name=shield-rtbh as=65020 " in r.text  # RouterOS before 7.20

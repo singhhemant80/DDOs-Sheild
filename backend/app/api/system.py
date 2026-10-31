@@ -200,9 +200,13 @@ def _validate_setting(key: str, value):
         if key == "internal_blackhole_community" and value:
             from .. import netvalidate as nv
             try:
-                nv.normalise_community(value)
+                c = nv.normalise_community(value)
             except ValueError as e:
                 raise HTTPException(422, f"internal_blackhole_community: {e}") from None
+            if c.count(":") != 1:  # the router filter and FRR's "set community" take standard communities
+                raise HTTPException(422, "internal_blackhole_community must be a standard community (A:B, each "
+                                         "0-65535), e.g. 65535:666. A 4-byte AS such as 154950 does not fit; "
+                                         "65535:666 is fine because these routes never leave your network.")
         return
     if isinstance(default, bool):
         if not isinstance(value, bool):
