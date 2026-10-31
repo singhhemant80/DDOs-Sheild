@@ -2,6 +2,8 @@ name: routeros-lab
 on:
   push:
     branches: [lab/routeros-chr]
+permissions:
+  contents: write
 jobs:
   chr:
     runs-on: ubuntu-24.04
@@ -17,3 +19,10 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: routeros-lab, path: out }
+      - if: always()
+        name: Publish results to a branch (artifacts are not readable from every client)
+        run: |
+          cd out
+          git init -q -b lab/routeros-chr-out && git add -A
+          git -c user.name=routeros-lab -c user.email=routeros-lab@users.noreply.github.com commit -q -m "RouterOS lab results ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:lab/routeros-chr-out
