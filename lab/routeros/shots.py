@@ -6,6 +6,7 @@ OUT = sys.argv[1]
 PAGES = [  # (file, menu path clicked in WebFig's left menu, tab)
     ("w-bgp-connections", ["Routing", "BGP"], "Connections"),
     ("w-bgp-sessions", ["Routing", "BGP"], "Sessions"),
+    ("w-bgp-instances", ["Routing", "BGP"], "Instances"),
     ("w-filter-rules", ["Routing", "Filters"], None),
     ("w-routes", ["IP", "Routes"], None),
     ("w-raw", ["IP", "Firewall"], "Raw"),

@@ -28,6 +28,15 @@ echo "/system/identity set name=Crapplet-Core-Router" | ros
 # An existing input rule, as on a real router, so place-before=0 has something to go before.
 echo '/ip/firewall/filter add chain=input action=accept connection-state=established,related comment="existing rule"' | ros
 
+echo "== BGP instance probe"
+show instances-before "/routing/bgp/instance/print detail"
+# Stands in for the instance a real edge router already has for its upstream sessions.
+echo "/routing/bgp/instance add name=core as=154950 router-id=10.0.2.15" | ros | tee "$OUT/apply-instance.txt"
+show instances "/routing/bgp/instance/print detail"
+for v in "as=154950 instance=core" "instance=core"; do
+  echo "probe: $v"; echo "/routing/bgp/connection add name=probe $v remote.address=192.0.2.9 remote.as=154950 local.role=ibgp disabled=yes" | ros
+  echo "/routing/bgp/connection remove [find name=probe]" | ros
+done 2>&1 | tee "$OUT/probe-connection.txt"
 echo "== router config (guide step B3)"; ros < "$HERE/router-config.rsc" | tee "$OUT/apply-config.txt"
 echo "== firewall (guide step B3)"
 echo '/ip/firewall/filter add chain=input protocol=tcp dst-port=179 src-address=10.0.2.2 action=accept place-before=0 comment="Crapplet Shield BGP"' | ros | tee "$OUT/apply-fw.txt"
@@ -57,7 +66,7 @@ sleep 10
 sudo vtysh -c "show bgp summary" | tee "$OUT/f-summary.txt"
 sudo vtysh -c "show bgp ipv4 unicast neighbors 127.0.0.40 advertised-routes" | tee "$OUT/f-advertised.txt"
 
-show bgp-connection "/routing/bgp/connection/print"
+show bgp-connection "/routing/bgp/connection/print detail"
 show bgp-session "/routing/bgp/session/print"
 show filter-rules "/routing/filter/rule/print"
 show routes-bgp "/ip/route/print where bgp"
