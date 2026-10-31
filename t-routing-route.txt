@@ -1,0 +1,9 @@
+[admin@MikroTik] > /routing/route/print where belongs-to~"bgp"
+Flags: F - FILTERED, A - ACTIVE; b - BGP; B - BLACKHOLE
+Columns: DST-ADDRESS, GATEWAY, AFI, ROUTING-TABLE, DISTANCE, SCOPE, 
+         TARGET-SCOPE, IMMEDIATE-GW
+    DST-ADDRESS       GATEWAY    AFI  ROUT  DIS  SCOPE  TA  IMMEDIATE-GW    
+Fb  8.8.8.8/32        192.0.2.1  ip   main  200     40  30  10.0.2.2%ether1 
+Fb  77.107.95.9/32    10.99.0.1  ip   main  200     40  30  10.99.0.1%ether2
+Fb  163.5.191.0/24    192.0.2.1  ip   main  200     40  30  10.0.2.2%ether1 
+AbB 163.5.191.250/32             ip   main  200                             

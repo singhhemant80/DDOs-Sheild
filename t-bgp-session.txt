@@ -1,0 +1,11 @@
+[admin@MikroTik] > /routing/bgp/session/print
+Flags: E - ESTABLISHED
+0  E name="shield-rtbh-1" instance=core remote.address=10.99.0.1 .as=154950
+     .id=10.99.0.1 .capabilities=mp,rr,em,gr,as4,ap,err,llgr,fqdn .afi=ip
+     .messages=3 .bytes=157 .gr-restart=yes .gr-time=120 .eor=ip
+     local.role=ibgp .address=10.99.0.2 .as=154950 .id=10.99.0.2
+     .cluster-id=10.99.0.2 .capabilities=mp,rr,enhe,gr,as4 .afi=ip .messages=1
+     .bytes=19 .eor="" output.procid=20 .filter-chain=shield-rtbh-out
+     input.procid=20 .filter=shield-rtbh-in .limit-process-routes=100 ibgp
+     multihop=yes hold-time=3m keepalive-time=1m uptime=11s550ms
+     last-started=2026-10-31 09:43:05 prefix-count=0

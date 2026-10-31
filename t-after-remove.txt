@@ -1,0 +1,5 @@
+[admin@MikroTik] > /routing/filter/rule/print count-only; /ip/firewall/raw/print count-only; /routing/bgp/connection/print count-only; /ip/route/print count-only where blackhole
+0
+0
+0
+1

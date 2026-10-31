@@ -1,0 +1,4 @@
+[admin@MikroTik] > /ip/route/print detail where dst-address=163.5.191.250/32
+Flags: D - DYNAMIC; A - ACTIVE; b - BGP
+DAb dst-address=163.5.191.250/32 routing-table=main blackhole immediate-gw=""
+    distance=200

@@ -1,0 +1,5 @@
+[admin@MikroTik] > /ip/route/print where bgp
+Flags: D - DYNAMIC; A - ACTIVE; b - BGP
+Columns: DST-ADDRESS, ROUTING-TABLE, DISTANCE
+    DST-ADDRESS       ROUTING-TABLE  DISTANCE
+DAb 163.5.191.250/32  main                200

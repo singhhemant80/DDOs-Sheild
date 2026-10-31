@@ -1,0 +1,16 @@
+[admin@MikroTik] > /routing/filter/rule/print
+0  ;;; Shield: 163.5.191.0/24
+   chain=shield-rtbh-in
+   rule="if (dst in 163.5.191.0/24 && dst-len >= 32 && bgp-communities 
+      includes 65535:666) { set blackhole yes; accept }"
+ 
+1  ;;; Shield: 77.107.95.0/24
+   chain=shield-rtbh-in
+   rule="if (dst in 77.107.95.0/24 && dst-len >= 32 && bgp-communities 
+      includes 65535:666) { set blackhole yes; accept }"
+ 
+2  ;;; Shield: everything else
+   chain=shield-rtbh-in rule="reject"
+ 
+3  ;;; Shield: send nothing to Shield
+   chain=shield-rtbh-out rule="reject"

@@ -1,0 +1,7 @@
+[admin@MikroTik] > /ip/firewall/raw/print
+0  ;;; shield:jump
+   chain=prerouting action=jump jump-target=shield-filter
+ 
+1  ;;; shield:3817c8ca:0
+   chain=shield-filter action=drop src-port=123 protocol=udp
+   dst-address=163.5.191.40

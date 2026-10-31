@@ -1,0 +1,6 @@
+[admin@MikroTik] > /ip/firewall/filter/print
+0  ;;; Crapplet Shield BGP
+   chain=input action=accept protocol=tcp src-address=10.99.0.1 dst-port=179
+ 
+1  ;;; existing rule
+   chain=input action=accept connection-state=established,related

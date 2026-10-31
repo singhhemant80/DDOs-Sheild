@@ -1,0 +1,2 @@
+[admin@MikroTik] > /routing/bgp/instance/print detail
+0  name="core" router-id=10.99.0.2 as=154950

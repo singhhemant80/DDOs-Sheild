@@ -1,0 +1,5 @@
+[admin@MikroTik] > /user/group/print where name=shield-filter
+0  ;;; Crapplet Shield: local filtering
+   name="shield-filter"
+   policy=read,write,api,!local,!telnet,!ssh,!ftp,!reboot,!policy,!test,
+      !winbox,!password,!web,!sniff,!sensitive,!romon,!rest-api skin=default

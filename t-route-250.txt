@@ -1,0 +1,6 @@
+[admin@MikroTik] > /routing/route/print detail where dst-address=163.5.191.250/32
+Flags: A - ACTIVE; b - BGP; B - BLACKHOLE
+AbB afi=ip contribution=active dst-address=163.5.191.250/32 routing-table=main
+    immediate-gw="" distance=200 belongs-to="bgp-IP-10.99.0.1"
+    bgp.session=shield-rtbh-1 .communities=no-export,blackhole .local-pref=100
+    .med=0 .origin=igp debug.fwp-ptr=0x202822A0

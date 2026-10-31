@@ -1,0 +1,18 @@
+[admin@MikroTik] > /system/resource/print
+                   uptime: 34s                                                 
+                  version: 7.25                                                
+               build-time: 2026-10-22 14:12:00                                 
+          minimum-version: 7.1                                                 
+              free-memory: 297.5MiB                                            
+             total-memory: 512.0MiB                                            
+                      cpu: AMD                                                 
+                cpu-count: 2                                                   
+            cpu-frequency: 2445MHz                                             
+                 cpu-load: 0%                                                  
+           free-hdd-space: 69.1MiB                                             
+          total-hdd-space: 89.2MiB                                             
+  write-sect-since-reboot: 1168                                                
+         write-sect-total: 1168                                                
+        architecture-name: x86_64                                              
+               board-name: CHR QEMU Ubuntu 24.04 PC v2 (i440FX + PIIX, arch_caps fix, 1996)
+                 platform: MikroTik                                            

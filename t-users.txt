@@ -1,0 +1,8 @@
+[admin@MikroTik] > /user/print
+Flags: E - EXPIRED
+Columns: NAME, GROUP, ADDRESS, INACTIVITY-POLICY
+#   NAME       GROUP          ADDRESS       INACTIVITY-POLICY
+;;; system default user
+0 E admin      full                         none             
+;;; Crapplet Shield filter account
+1   shield-fw  shield-filter  10.99.0.1/32  none             

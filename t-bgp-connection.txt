@@ -1,0 +1,6 @@
+[admin@MikroTik] > /routing/bgp/connection/print detail
+0  ;;; Crapplet Shield blackhole signalling
+   name="shield-rtbh" instance=core remote.address=10.99.0.1 .as=154950
+   local.default-address=10.99.0.2 .role=ibgp routing-table=main as=154950
+   multihop=yes output.filter-chain=shield-rtbh-out input.filter=shield-rtbh-in
+   .limit-process-routes-ipv4=100

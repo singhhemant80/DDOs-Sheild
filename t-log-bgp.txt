@@ -1,0 +1,7 @@
+[admin@MikroTik] > /log/print where topics~"bgp"
+ 2026-10-31 09:43:00 route,bgp,info Initializing shield-rtbh connection {l_addr: 10.0.2.15:179, r_addr: 10.99.0.1:179}
+ 2026-10-31 09:43:00 route,bgp,info shield-rtbh connection {l_addr: 10.0.2.15:179, r_addr: 10.99.0.1:179} refused
+ 2026-10-31 09:43:00 route,bgp,info Initializing shield-rtbh connection {l_addr: 10.99.0.2:179, r_addr: 10.99.0.1:179}
+ 2026-10-31 09:43:01 route,bgp,info Starting connection {l_addr: 10.99.0.2:33091, r_addr: 10.99.0.1:179}
+ 2026-10-31 09:43:05 route,bgp,info Starting connection {l_addr: 10.99.0.2:179, r_addr: 10.99.0.1:33542}
+ 2026-10-31 09:43:05 route,bgp,info shield-rtbh-1 {l_addr: 10.99.0.2, r_addr: 10.99.0.1} Established
