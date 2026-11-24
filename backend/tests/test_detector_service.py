@@ -216,3 +216,62 @@ def test_websocket_forwards_incident_events(client):
             if m.get("type") == "incident":
                 got = m
         assert got["event"] == "confirmed"
+
+
+def outflood(ts, pps=60_000, ip=VICTIM):
+    s = {"ip": ip, "prefix": "163.5.191.0/24", "pps": pps, "bps": pps * 480, "udp_pps": 0, "tcp_pps": pps,
+         "icmp_pps": 0, "other_pps": 0, "syn_pps": pps, "ack_pps": 0, "rst_pps": 0, "frag_pps": 0,
+         "sources_est": 1, "provenance": "sampled"}
+    return {"ts": ts, "dsts": [], "srcs": [s] if pps else []}
+
+
+def test_outbound_attack_is_an_incident_of_its_own(client, as_role, db, prefix, engineer):
+    ps = R.pubsub()
+    ps.subscribe("shield:events")
+    svc = DetectorService(rds=R)
+    for i in range(30):   # the customer is attacked AND sends a SYN flood out at the same time
+        snap = outflood(T0 + i)
+        snap["dsts"] = flood(T0 + i)["dsts"]
+        svc.process(snap)
+    db.expire_all()
+    rows = {r.direction: r for r in db.execute(select(AttackIncident)).scalars()}
+    assert set(rows) == {"inbound", "outbound"}
+    out = rows["outbound"]
+    assert str(out.target) == VKEY and out.scope == "host" and out.status.value == "confirmed"
+    assert out.vectors[0] == "out_syn_flood" and out.protected_prefix_id == prefix["id"]
+    assert svc.incidents["out:" + VKEY] == out.id
+    svc._publish_status()
+    assert json.loads(R.get("shield:detector:hot")) == {"targets": [VKEY], "senders": [VKEY]}
+    msgs = []
+    while (m := ps.get_message(timeout=0.2)) is not None:
+        if m["type"] == "message":
+            msgs.append(json.loads(m["data"])["incident"])
+    assert any(m["direction"] == "outbound" and m["target"] == VKEY for m in msgs)
+
+    # API: direction filter, detail, summary count; customer shown for the sender.
+    noc = as_role(Role.NOC_OPERATOR)
+    lst = client.get("/api/v1/attacks?direction=outbound", headers=noc).json()
+    assert [x["id"] for x in lst] == [str(out.id)] and lst[0]["direction"] == "outbound"
+    assert lst[0]["customer"]["customer_ref"] == "C-1042"
+    assert client.get("/api/v1/attacks/summary", headers=noc).json()["outbound_open"] == 1
+    # Never mitigated as if it were a victim.
+    r = client.post("/api/v1/mitigation/preview", headers=engineer,
+                    json={"target": VKEY, "strategy": "rtbh_internal", "incident_id": str(out.id)})
+    assert r.status_code == 422 and "outbound" in r.text
+
+    # Restart resumes it under its outbound key; it ends when the sender stops.
+    svc2 = DetectorService(rds=R)
+    assert svc2.incidents["out:" + VKEY] == out.id
+    for i in range(125):
+        svc2.process(outflood(T0 + 30 + i, 0))
+    db.expire_all()
+    assert db.get(AttackIncident, out.id).status.value == "resolved"
+
+
+def test_outbound_settings_ranges(client, admin):
+    put = lambda k, v: client.put(f"/api/v1/settings/{k}", json={"value": v}, headers=admin).status_code  # noqa: E731
+    assert put("outbound_bps", 2_000_000_000) == 200
+    assert put("outbound_scan_targets", 0) == 200          # check switched off
+    assert put("outbound_syn_pps", -1) == 422
+    assert put("outbound_detection", False) == 200
+    assert put("outbound_detection", 1) == 422

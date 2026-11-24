@@ -75,18 +75,22 @@ def from_event(msg: dict, base_url: str = "") -> list[Alert]:
         iid = inc.get("id")
         vectors = ", ".join(v.replace("_", " ") for v in inc.get("vectors") or [])
         sev = inc.get("severity") or "high"
+        out = inc.get("direction") == "outbound"
+        what = f"Outbound attack from {inc.get('target')}" if out else f"Attack on {inc.get('target')}"
         if ev == "confirmed":
+            lines = [f"Peak {_rate(inc.get('peak_pps'), inc.get('peak_bps'))}" if inc.get("peak_pps") else "",
+                     f"Confidence {float(inc.get('confidence') or 0):.0%}"]
+            if out:
+                lines.append("One of your addresses is sending this to the outside: check the machine or customer.")
             return [Alert("incident_confirmed", sev, f"incident:{iid}:confirmed",
-                          f"Attack on {inc.get('target')}: {vectors or 'traffic anomaly'}",
-                          [f"Peak {_rate(inc.get('peak_pps'), inc.get('peak_bps'))}" if inc.get("peak_pps") else "",
-                           f"Confidence {float(inc.get('confidence') or 0):.0%}"], iid, link(f"/attacks/{iid}"))]
+                          f"{what}: {vectors or 'traffic anomaly'}", lines, iid, link(f"/attacks/{iid}"))]
         if ev == "escalated":
             return [Alert("incident_escalated", sev, f"incident:{iid}:escalated:{sev}",
-                          f"Attack on {inc.get('target')} is now {sev}",
+                          f"{what} is now {sev}",
                           [vectors, f"Peak {_rate(inc.get('peak_pps'), inc.get('peak_bps'))}"], iid, link(f"/attacks/{iid}"))]
         if ev in ("resolved", "false_positive"):
             return [Alert("incident_resolved", "info", f"incident:{iid}:resolved",
-                          f"Attack on {inc.get('target')} ended" + (" (marked not an attack)" if ev == "false_positive" else ""),
+                          f"{what} ended" + (" (marked not an attack)" if ev == "false_positive" else ""),
                           [], iid, link(f"/attacks/{iid}"))]
         return []
     if t == "mitigation":

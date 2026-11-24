@@ -33,7 +33,7 @@ import (
 	"shield/collector/internal/sflow"
 )
 
-const version = "1.0.2"
+const version = "1.1.0"
 
 type exporterStats struct {
 	kind             atomic.Value
@@ -56,6 +56,7 @@ type app struct {
 	reg       *metrics.Registry
 	prefixes  prefix.Holder
 	hot       prefix.Holder // targets of open incidents (from the detector): their sources are always stored
+	hotOut    prefix.Holder // local senders with an open outbound incident: their targets are always stored
 	asns      asndb.Holder  // source address -> origin AS, for per-network attack totals
 	prefixSrc atomic.Value
 	nf        *netflow.Decoder
@@ -72,7 +73,7 @@ type app struct {
 	queueDrops, rejected, decodeErr *atomic.Uint64
 	records, packets                *atomic.Uint64
 	redisErr, published             *atomic.Uint64
-	dstsDropped                     atomic.Uint64
+	dstsDropped, srcsDropped        atomic.Uint64
 	spreadPending                   atomic.Int64
 }
 
@@ -114,6 +115,7 @@ func newApp(cfg *config.Config, log *slog.Logger) *app {
 	}
 	a.prefixes.Store(prefix.New(cfg.Prefixes()))
 	a.hot.Store(prefix.New(nil))
+	a.hotOut.Store(prefix.New(nil))
 	a.prefixSrc.Store("static")
 	if cfg.ClickHouse.Enabled {
 		a.ch = chsink.New(chsink.Config{URL: cfg.ClickHouse.URL, Database: cfg.ClickHouse.Database,
@@ -284,6 +286,7 @@ func (a *app) aggregate(ctx context.Context) {
 		srcTick.Stop()
 	}
 	hot := func(ip netip.Addr) bool { _, ok := a.hot.Load().Lookup(ip); return ok }
+	hotOut := func(ip netip.Addr) bool { _, ok := a.hotOut.Load().Lookup(ip); return ok }
 	for {
 		select {
 		case <-ctx.Done():
@@ -313,10 +316,19 @@ func (a *app) aggregate(ctx context.Context) {
 			for _, r := range nets {
 				a.ch.Add("asn_10s", output.NetRowOf(r))
 			}
+			// Outbound: where each busy or attacking local sender sends to.
+			rows, nets = ag.Targets(t, a.cfg.Sources.MinPPS, a.cfg.Sources.Top, hotOut)
+			for _, r := range rows {
+				a.ch.Add("out_targets_10s", output.SrcRowOf(r))
+			}
+			for _, r := range nets {
+				a.ch.Add("out_asn_10s", output.NetRowOf(r))
+			}
 		case t := <-tick.C:
 			// The bucket being closed is the second that just ended.
 			s := ag.Tick(t.Truncate(time.Second).Add(-time.Second))
 			a.dstsDropped.Store(ag.Dropped)
+			a.srcsDropped.Store(ag.DroppedSrcs)
 			a.spreadPending.Store(int64(s.SpreadPending))
 			select {
 			case pubCh <- s:
@@ -358,6 +370,11 @@ func (a *app) publisher(ctx context.Context, in <-chan agg.Second) {
 			for _, d := range full.Dsts {
 				if d.PPS >= a.cfg.ClickHouse.StoreMinPPS {
 					a.ch.Add("dst_1s", output.DstRowOf(s.TS, d))
+				}
+			}
+			for _, d := range full.Srcs {
+				if d.PPS >= a.cfg.ClickHouse.StoreMinPPS {
+					a.ch.Add("out_1s", output.DstRowOf(s.TS, d)) // dst column = local sender
 				}
 			}
 		}
@@ -465,22 +482,28 @@ func (a *app) refreshHot() {
 	if err != nil {
 		if errors.Is(err, redisx.Nil) {
 			a.hot.Store(prefix.New(nil))
+			a.hotOut.Store(prefix.New(nil))
 		}
 		return
 	}
 	var doc struct {
 		Targets []string `json:"targets"`
+		Senders []string `json:"senders"` // local addresses with an open outbound incident
 	}
 	if json.Unmarshal([]byte(raw), &doc) != nil {
 		return
 	}
-	ps := make([]netip.Prefix, 0, len(doc.Targets))
-	for _, s := range doc.Targets {
-		if p, err := netip.ParsePrefix(s); err == nil {
-			ps = append(ps, p.Masked())
+	parse := func(list []string) *prefix.Set {
+		ps := make([]netip.Prefix, 0, len(list))
+		for _, s := range list {
+			if p, err := netip.ParsePrefix(s); err == nil {
+				ps = append(ps, p.Masked())
+			}
 		}
+		return prefix.New(ps)
 	}
-	a.hot.Store(prefix.New(ps))
+	a.hot.Store(parse(doc.Targets))
+	a.hotOut.Store(parse(doc.Senders))
 }
 
 func (a *app) status() output.Status {
@@ -488,7 +511,7 @@ func (a *app) status() output.Status {
 		TS: time.Now().Unix(), Version: version, StartedAt: a.started.Unix(),
 		Prefixes: a.prefixes.Load().Len(), PrefixSource: a.prefixSrc.Load().(string),
 		QueueDrops: a.queueDrops.Load(), RejectedPkts: a.rejected.Load(), DecodeErrors: a.decodeErr.Load(),
-		MissingTmpl: a.nf.Stats().MissingTemplate, DstsDropped: a.dstsDropped.Load(),
+		MissingTmpl: a.nf.Stats().MissingTemplate, DstsDropped: a.dstsDropped.Load(), SrcsDropped: a.srcsDropped.Load(),
 		SpreadPending: int(a.spreadPending.Load()), Exporters: []output.ExporterStatus{},
 	}
 	if a.ch != nil {

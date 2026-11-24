@@ -202,7 +202,7 @@ class Notifier:
                         if inc.confirmed_at <= now - timedelta(seconds=ch.escalate_after_seconds):
                             mins = int((now - inc.confirmed_at).total_seconds() // 60)
                             esc.append((ch, Alert("incident_unacknowledged", "critical", f"incident:{inc.id}:unacked",
-                                                  f"Attack on {inc.target} not acknowledged for {mins} min",
+                                                  (f"Outbound attack from {inc.target}" if inc.direction == "outbound" else f"Attack on {inc.target}") + f" not acknowledged for {mins} min",
                                                   [", ".join(inc.vectors or [])], str(inc.id), link(f"/attacks/{inc.id}"))))
             else:
                 esc = []

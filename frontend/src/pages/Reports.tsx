@@ -15,6 +15,8 @@ type Summary = {
   top_targets: { target: string; attacks: number; customer: string | null }[];
   top_source_networks: { asn: number; as_name: string | null; attacks: number; packets: number }[];
   mitigations: Record<string, Record<string, number>>; mitigations_total: number; mitigations_automatic: number;
+  outbound_attacks?: number; outbound_minutes?: number;
+  top_senders?: { sender: string; attacks: number; customer: string | null; vectors: string[] }[];
 };
 
 function Stat({ k, v, sub }: { k: string; v: React.ReactNode; sub?: React.ReactNode }) {
@@ -86,6 +88,15 @@ export function ReportsPage() {
             { key: "k", header: "Method", render: ([k]) => k },
             { key: "s", header: "Outcome", render: ([, v]) => <div className="flex flex-wrap gap-1">{Object.entries(v).map(([st, n]) =>
               <Badge key={st} tone={st === "failed" || st === "rolled_back" ? "attack" : st === "active" ? "signal" : "neutral"}>{n} {st.replace("_", " ")}</Badge>)}</div> },
+          ]} />
+        </Section>
+        <Section title={`Outbound: attacks sent from your addresses (${d.outbound_attacks ?? 0})`}
+          aside={d.outbound_attacks ? `${d.outbound_minutes} min in total` : undefined} flush>
+          <Table dense rows={d.top_senders ?? []} rowKey={(t) => t.sender} empty="None of your addresses sent attack traffic in this period." cols={[
+            { key: "s", header: "Sender", render: (t) => <span className="font-mono text-[13px]">{t.sender.replace(/\/(32|128)$/, "")}</span> },
+            { key: "c", header: "Customer", render: (t) => t.customer ?? <span className="text-ink-3">–</span> },
+            { key: "v", header: "Attack types", render: (t) => t.vectors.map(vectorName).join(", ") },
+            { key: "n", header: "Attacks", align: "right", render: (t) => t.attacks },
           ]} />
         </Section>
         <p className="text-xs text-ink-3">{dateTime(d.from)} to {dateTime(d.to)}. Confirmed attacks only; rates come from sampled flow data

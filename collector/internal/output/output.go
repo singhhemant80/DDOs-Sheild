@@ -18,7 +18,7 @@ const (
 	StreamFull   = "shield:traffic:stream"   // XADD full per-destination detail for the detector
 	KeyIfaces    = "shield:ifaces"           // HASH "agent|ifIndex" -> iftrack.Rate JSON
 	KeyCollector = "shield:collector:status" // Status JSON (EX 15)
-	KeyHot       = "shield:detector:hot"     // written by the detector: {"targets":["163.5.191.30/32",...]} (EX 30)
+	KeyHot       = "shield:detector:hot"     // written by the detector: {"targets":["163.5.191.30/32",...],"senders":[...]} (EX 30)
 	HistoryLen   = 3600
 )
 
@@ -57,6 +57,11 @@ type Snapshot struct {
 	Out      Rates `json:"out"`
 	Dsts     []Dst `json:"dsts"`
 	DstCount int   `json:"dst_count"` // total active protected destinations this second
+	// Outbound: local addresses sending out of the protected prefixes. "ip" is the local sender,
+	// "sources_est" the number of distinct outside addresses it sent to, "reflect" UDP packets
+	// sent FROM a reflection port (the sender answering as an amplifier).
+	Srcs     []Dst `json:"srcs"`
+	SrcCount int   `json:"src_count"`
 }
 
 // HistoryPoint is the compact form kept for charts (one per second).
@@ -108,11 +113,27 @@ func Build(s *agg.Second, top, fullMax int, minPPS float64) (compact, full Snaps
 			full.Dsts = append(full.Dsts, d)
 		}
 	}
+	compact.SrcCount, full.SrcCount = len(s.Srcs), len(s.Srcs)
+	for i := range s.Srcs {
+		d := dst(&s.Srcs[i])
+		if i < top {
+			compact.Srcs = append(compact.Srcs, d)
+		}
+		if len(full.Srcs) < fullMax && d.PPS >= minPPS {
+			full.Srcs = append(full.Srcs, d)
+		}
+	}
 	if compact.Dsts == nil {
 		compact.Dsts = []Dst{}
 	}
 	if full.Dsts == nil {
 		full.Dsts = []Dst{}
+	}
+	if compact.Srcs == nil {
+		compact.Srcs = []Dst{}
+	}
+	if full.Srcs == nil {
+		full.Srcs = []Dst{}
 	}
 	hist = HistoryPoint{TS: compact.TS, InPPS: in.PPS, InBPS: in.BPS, OutPPS: out.PPS, OutBPS: out.BPS,
 		TCP: in.TCPPPS, UDP: in.UDPPPS, ICMP: in.ICMPPPS, Other: in.OtherPPS, Prov: in.Provenance}
@@ -253,6 +274,7 @@ type Status struct {
 	DecodeErrors  uint64           `json:"decode_errors"`
 	MissingTmpl   uint64           `json:"missing_template_records"`
 	DstsDropped   uint64           `json:"destinations_dropped"`
+	SrcsDropped   uint64           `json:"senders_dropped"`
 	ClickHouse    map[string]any   `json:"clickhouse"`
 	SpreadPending int              `json:"spread_pending"`
 }

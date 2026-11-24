@@ -4,7 +4,7 @@ import { LiveChart } from "../components/LiveChart";
 import { Num, ProvLegend, ProvTag } from "../components/Provenance";
 import { Badge, Notice, Section, Select, Table } from "../components/ui";
 import { useApi, useLiveTraffic, type Dst } from "../lib/hooks";
-import { useAttackedTargets, useLive, vectorName } from "../lib/live";
+import { isOutbound, useAttackedTargets, useLive, vectorName } from "../lib/live";
 import { ago, bps, count, pct, pps } from "../lib/format";
 import { InterfaceList, type Iface } from "./shared";
 
@@ -40,8 +40,10 @@ export function Overview() {
 
   const saturated = (ifaces.data?.interfaces ?? []).filter((i) => i.saturated);
   const { incidents } = useLive();
-  const confirmedAttacks = incidents.filter((i) => i.status !== "suspected");
-  const suspectedCount = incidents.length - confirmedAttacks.length;
+  const inbound = incidents.filter((i) => !isOutbound(i));
+  const outbound = incidents.filter((i) => isOutbound(i) && i.status !== "suspected");
+  const confirmedAttacks = inbound.filter((i) => i.status !== "suspected");
+  const suspectedCount = inbound.length - confirmedAttacks.length;
 
   return (
     <div className="space-y-5">
@@ -50,6 +52,13 @@ export function Overview() {
           <strong>{confirmedAttacks.length} attack{confirmedAttacks.length === 1 ? "" : "s"} under way:</strong>{" "}
           {confirmedAttacks.slice(0, 3).map((i) => `${i.target.replace(/\/(32|128)$/, "")} (${vectorName(i.vectors[0] ?? "")}, ${pps(i.current?.pps ?? i.peak_pps)})`).join("; ")}
           {confirmedAttacks.length > 3 && ` and ${confirmedAttacks.length - 3} more`}. Open active attacks.
+        </Link>
+      )}
+      {outbound.length > 0 && (
+        <Link to="/attacks" className="block rounded-[3px] border border-warn bg-warn-soft px-4 py-3 text-warn hover:brightness-[0.98]">
+          <strong>{outbound.length} of your address{outbound.length === 1 ? " is" : "es are"} sending attack traffic out:</strong>{" "}
+          {outbound.slice(0, 3).map((i) => `${i.target.replace(/\/(32|128)$/, "")} (${vectorName(i.vectors[0] ?? "")}, ${pps(i.current?.pps ?? i.peak_pps)})`).join("; ")}
+          {outbound.length > 3 && ` and ${outbound.length - 3} more`}. Check these machines.
         </Link>
       )}
       {saturated.map((i) => (
@@ -73,6 +82,7 @@ export function Overview() {
             <div className="text-sm text-ink-2">Outbound</div>
             <div className="text-2xl font-medium"><Num v={s?.out.pps} p={outProv} fmt={pps} /></div>
             <div className="text-ink-2"><Num v={s?.out.bps} p={outProv} fmt={bps} /></div>
+            {fresh && s!.src_count !== undefined && <div className="text-xs text-ink-3">from {count(s!.src_count)} of your addresses</div>}
           </div>
           <div className="sm:border-l sm:border-rule-soft sm:pl-6">
             <div className="text-sm text-ink-2">Destinations receiving traffic</div>
@@ -104,6 +114,15 @@ export function Overview() {
           <InterfaceList rows={ifaces.data?.interfaces ?? []} />
         </Section>
       </div>
+
+      <Section title="Busiest senders right now (outbound)" aside="Your addresses sending out of your network" flush>
+        {fresh && s!.srcs === undefined
+          ? <p className="px-4 py-3 text-sm text-ink-2">The collector is older than 1.1.0 and does not report senders yet. Update Shield.</p>
+          : fresh && !s!.out.pps
+          ? <p className="px-4 py-3 text-sm text-ink-2">No outgoing traffic is in the flow data. To see which of your addresses send attacks, the router must
+              also export flows for traffic leaving your network (customer-facing interfaces). See docs/outbound.md.</p>
+          : <TopSenders rows={fresh ? (s!.srcs ?? []).slice(0, 8) : []} />}
+      </Section>
 
       <div className="grid gap-5 xl:grid-cols-[1.35fr_1fr]">
         <Section title="Recent changes and sign-ins" aside={<Link className="text-signal hover:underline" to="/audit">Audit log</Link>} flush>
@@ -164,6 +183,33 @@ export function TopDsts({ rows, onPick }: { rows: Dst[]; onPick?: (d: Dst) => vo
         { key: "bps", header: "Bits/s", align: "right", render: (r) => <Num v={r.bps} p={r.provenance} fmt={bps} /> },
         { key: "mix", header: "Protocol mix", render: (r) => <Mix d={r} /> },
         { key: "src", header: "Sources", align: "right", render: (r) => <span title="Estimated distinct source addresses">≈{count(r.sources_est)}</span> },
+        { key: "prov", header: "Data", render: (r) => <ProvTag p={r.provenance} /> },
+      ]} />
+  );
+}
+
+/** Your addresses that send the most traffic out, with their outbound incident if any. */
+export function TopSenders({ rows }: { rows: Dst[] }) {
+  const attacking = useAttackedTargets("outbound");
+  return (
+    <Table dense rows={rows} rowKey={(r) => r.ip}
+      empty="No outgoing traffic from your addresses in the last second."
+      cols={[
+        { key: "ip", header: "Sender (your address)", render: (r) => {
+          const inc = attacking.get(r.ip);
+          return (
+            <div>
+              <div className="font-medium">{r.ip}{" "}
+                {inc && <Link to={`/attacks/${inc.id}`}>
+                  <Badge tone={inc.status === "suspected" ? "warn" : "attack"}>{inc.status === "suspected" ? "Suspected" : "Attacking"}: {vectorName(inc.vectors[0] ?? "")}</Badge></Link>}
+              </div>
+              <div className="text-xs text-ink-3">{r.prefix}</div>
+            </div>);
+        } },
+        { key: "pps", header: "Packets/s", align: "right", render: (r) => <Num v={r.pps} p={r.provenance} fmt={pps} /> },
+        { key: "bps", header: "Bits/s", align: "right", render: (r) => <Num v={r.bps} p={r.provenance} fmt={bps} /> },
+        { key: "mix", header: "Protocol mix", render: (r) => <Mix d={r} /> },
+        { key: "t", header: "Targets", align: "right", render: (r) => <span title="Estimated distinct outside addresses it sent to">≈{count(r.sources_est)}</span> },
         { key: "prov", header: "Data", render: (r) => <ProvTag p={r.provenance} /> },
       ]} />
   );

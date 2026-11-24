@@ -38,6 +38,7 @@ KEY_DETECTOR = "shield:detector:status"
 class IncidentOut(BaseModel):
     id: uuid.UUID
     target: str
+    direction: str = "inbound"
     scope: str
     prefix: str | None
     status: str
@@ -111,7 +112,7 @@ def _out(db: Session, inc: AttackIncident, customers: dict, prefixes: dict, user
     end = inc.resolved_at or datetime.now(UTC)
     t = str(inc.target)
     return dict(
-        id=inc.id, target=t, scope=inc.scope, prefix=prefixes.get(inc.protected_prefix_id),
+        id=inc.id, target=t, direction=inc.direction, scope=inc.scope, prefix=prefixes.get(inc.protected_prefix_id),
         status=inc.status.value, severity=inc.severity.value, vectors=list(inc.vectors),
         confidence=float(inc.confidence), current_confidence=(inc.current or {}).get("confidence"),
         peak_pps=inc.peak_pps, peak_bps=inc.peak_bps,
@@ -158,6 +159,7 @@ def list_incidents(
     state: str = Query("open", pattern="^(open|closed|all)$"),
     severity: str | None = Query(None, pattern="^(info|low|medium|high|critical)$"),
     q: str | None = Query(None, max_length=64, description="Address or prefix to search within"),
+    direction: str | None = Query(None, pattern="^(inbound|outbound)$"),
     confirmed_only: bool = False,
     since: datetime | None = None,
     before: datetime | None = Query(None, description="Paging cursor: first_detected_at of the last row"),
@@ -174,6 +176,8 @@ def list_incidents(
         stmt = stmt.where(AttackIncident.severity == severity)
     if confirmed_only:
         stmt = stmt.where(AttackIncident.confirmed_at.is_not(None))
+    if direction:
+        stmt = stmt.where(AttackIncident.direction == direction)
     if since:
         stmt = stmt.where(AttackIncident.first_detected_at >= since)
     if before:
@@ -207,6 +211,8 @@ def summary(_: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(ge
     out = {"open": 0, "suspected": 0, "confirmed": 0, "by_severity": {}, "confirmed_last_24h": confirmed_24h,
            "unacknowledged": db.execute(select(func.count()).select_from(AttackIncident).where(
                AttackIncident.status.in_(OPEN_INCIDENT_STATES), AttackIncident.acknowledged_at.is_(None))).scalar_one()}
+    out["outbound_open"] = db.execute(select(func.count()).select_from(AttackIncident).where(
+        AttackIncident.status.in_(OPEN_INCIDENT_STATES), AttackIncident.direction == "outbound")).scalar_one()
     for status, sev, n in rows:
         out["open"] += n
         key = "suspected" if status == IncidentStatus.SUSPECTED else "confirmed"
@@ -246,6 +252,23 @@ def incident_series(incident_id: uuid.UUID, _: Principal = Depends(require(Perm.
         params["dst"] = str(ipaddress.ip_network(str(inc.target)).network_address)
     else:
         params["prefix"] = str(inc.target)
+    if inc.direction == "outbound":
+        # What the local sender sent out (kept per second for 30 days; no minute rollup).
+        if minute:
+            return {"available": False, "reason": "Outbound traffic is kept 30 days", "points": []}
+        sql = """SELECT toUnixTimestamp(toStartOfInterval(ts, INTERVAL {step:UInt32} SECOND)) AS t,
+                        avg(pps) AS pps, avg(bps) AS bps, avg(tcp_pps) AS tcp_pps, avg(udp_pps) AS udp_pps,
+                        avg(icmp_pps) AS icmp_pps, avg(syn_pps) AS syn_pps, avg(frag_pps) AS frag_pps,
+                        avg(sources_est) AS targets
+                 FROM out_1s WHERE dst = {dst:String}
+                   AND ts >= {since:DateTime('UTC')} AND ts <= {until:DateTime('UTC')}
+                 GROUP BY t ORDER BY t"""
+        try:
+            rows = tm.ch_query(sql, params)
+        except tm.ClickHouseUnavailable:
+            return {"available": False, "reason": "ClickHouse unavailable", "points": []}
+        return {"available": True, "step_seconds": step, "from": start, "to": end, "points": rows,
+                "resolution": "1s", "direction": "outbound"}
     if minute:
         where = "dst = {dst:String}" if host else "dst IN (SELECT DISTINCT dst FROM dst_1m WHERE prefix = {prefix:String})"
         sql = f"""SELECT t, avg(p) AS pps, avg(b) AS bps, avg(u) AS udp_pps, avg(s) AS syn_pps FROM (

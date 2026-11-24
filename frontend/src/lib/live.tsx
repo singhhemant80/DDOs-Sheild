@@ -4,6 +4,8 @@ import type { HistoryPoint, LiveState, Provenance, Snapshot } from "./hooks";
 
 export type Incident = {
   id: string; target: string; scope: "host" | "prefix"; prefix: string | null;
+  /** inbound: an attack on target. outbound: target (your address) is sending the attack out. */
+  direction?: "inbound" | "outbound";
   status: "suspected" | "confirmed" | "mitigating" | "mitigated" | "resolved" | "false_positive";
   severity: "info" | "low" | "medium" | "high" | "critical"; vectors: string[];
   confidence: number; current_confidence: number | null; peak_pps: number | null; peak_bps: number | null;
@@ -155,15 +157,19 @@ export function useLiveTraffic(windowSec = 300) {
   return { latest, history: sliced, state, reason };
 }
 
-/** Open incidents keyed by host address, for highlighting rows elsewhere. */
-export function useAttackedTargets() {
+/** Open incidents keyed by host address, for highlighting rows elsewhere. Inbound by default;
+ *  "outbound" gives your addresses that are sending an attack out. */
+export function useAttackedTargets(direction: "inbound" | "outbound" = "inbound") {
   const { incidents } = useLive();
   return useMemo(() => {
     const m = new Map<string, Incident>();
-    for (const i of incidents) m.set(i.target.replace(/\/(32|128)$/, ""), i);
+    for (const i of incidents)
+      if ((i.direction ?? "inbound") === direction) m.set(i.target.replace(/\/(32|128)$/, ""), i);
     return m;
-  }, [incidents]);
+  }, [incidents, direction]);
 }
+
+export const isOutbound = (i: Pick<Incident, "direction">) => i.direction === "outbound";
 
 // ---------------------------------------------------------------- vocabulary
 export const VECTOR_NAMES: Record<string, string> = {
@@ -176,6 +182,16 @@ export const VECTOR_NAMES: Record<string, string> = {
   wsd_amplification: "WS-Discovery reflection", coap_amplification: "CoAP reflection",
   ard_amplification: "ARD reflection", portmap_amplification: "Portmap reflection",
   netbios_amplification: "NetBIOS reflection",
+  // Outbound: sent BY one of your addresses
+  out_syn_flood: "SYN flood (sending)", out_udp_flood: "UDP flood (sending)", out_icmp_flood: "ICMP flood (sending)",
+  out_ack_flood: "ACK flood (sending)", out_rst_flood: "RST flood (sending)", out_fragment_flood: "Fragment flood (sending)",
+  out_volumetric_pps: "High packet rate (sending)", out_volumetric_bps: "High bandwidth (sending)",
+  out_scan: "Scanning", dns_reflector: "Used as DNS reflector", ntp_reflector: "Used as NTP reflector",
+  ssdp_reflector: "Used as SSDP reflector", cldap_reflector: "Used as CLDAP reflector",
+  memcached_reflector: "Used as Memcached reflector", chargen_reflector: "Used as Chargen reflector",
+  snmp_reflector: "Used as SNMP reflector", wsd_reflector: "Used as WS-Discovery reflector",
+  coap_reflector: "Used as CoAP reflector", ard_reflector: "Used as ARD reflector",
+  portmap_reflector: "Used as Portmap reflector", netbios_reflector: "Used as NetBIOS reflector",
 };
 export const vectorName = (v: string) => VECTOR_NAMES[v] ?? v.replace(/_/g, " ");
 

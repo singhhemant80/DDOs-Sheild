@@ -163,13 +163,18 @@ type Second struct {
 	In, Out, Unmatched Counters
 	InProv, OutProv    string
 	Dsts               []Dst // protected destinations, sorted by packets desc
-	SpreadPending      int
+	// Srcs are addresses inside the protected prefixes sending traffic out of them (outbound),
+	// sorted by packets desc. In each entry IP is the local sender and Sources estimates how many
+	// distinct outside addresses it sent to.
+	Srcs          []Dst
+	SpreadPending int
 }
 
 type Config struct {
 	SpreadThreshold time.Duration
 	MaxSpread       time.Duration
 	MaxDsts         int // memory bound on tracked destinations
+	MaxSrcs         int // memory bound on tracked outbound senders
 	SourcesPerDst   int // memory bound on sources tracked per destination per window
 	SourcesTotal    int // memory bound on sources tracked in total per window
 	// ASNLookup maps a source to its origin AS and country (asndb); nil = unknown.
@@ -180,13 +185,16 @@ type Config struct {
 }
 
 type Aggregator struct {
-	cfg      Config
-	prefixes *prefix.Holder
-	dsts     map[netip.Addr]*dstState
-	in, out  Counters
-	unmatch  Counters
-	Dropped  uint64 // destinations not tracked because MaxDsts was hit
-	sources  *sourceTracker
+	cfg         Config
+	prefixes    *prefix.Holder
+	dsts        map[netip.Addr]*dstState
+	srcs        map[netip.Addr]*dstState // outbound senders (same per-second state, keyed by local source)
+	in, out     Counters
+	unmatch     Counters
+	Dropped     uint64 // destinations not tracked because MaxDsts was hit
+	DroppedSrcs uint64 // outbound senders not tracked because MaxSrcs was hit
+	sources     *sourceTracker
+	targets     *sourceTracker // outbound: the outside addresses each local sender sends to
 }
 
 func New(cfg Config, prefixes *prefix.Holder) *Aggregator {
@@ -199,11 +207,18 @@ func New(cfg Config, prefixes *prefix.Holder) *Aggregator {
 	if cfg.MaxDsts == 0 {
 		cfg.MaxDsts = 200_000
 	}
+	if cfg.MaxSrcs == 0 {
+		cfg.MaxSrcs = 100_000
+	}
 	return &Aggregator{cfg: cfg, prefixes: prefixes, dsts: map[netip.Addr]*dstState{},
-		sources: newSourceTracker(cfg)}
+		srcs: map[netip.Addr]*dstState{}, sources: newSourceTracker(cfg), targets: newSourceTracker(cfg)}
 }
 
 // Add accounts one record. Not safe for concurrent use: call from the aggregator goroutine.
+//
+// Inbound: the destination is in a protected prefix (tracked per destination). Outbound: the
+// source is in a protected prefix and the destination is not (tracked per local sender, to find
+// customers whose machines attack others). Traffic between two protected addresses is inbound.
 func (a *Aggregator) Add(r *flow.Record) {
 	ps := a.prefixes.Load()
 	c := fromRecord(r)
@@ -220,30 +235,49 @@ func (a *Aggregator) Add(r *flow.Record) {
 		}
 		st.cur.sources.add(r.Src)
 		a.sources.add(r.Dst, p, r.Src, r.SrcAS, &c, r.Proto, r.SrcPort, r.DstPort)
-		dur := time.Duration(r.DurationMs) * time.Millisecond
-		if dur > a.cfg.SpreadThreshold {
-			n := int(min(dur, a.cfg.MaxSpread) / time.Second)
-			var per Counters
-			per.add(&c, 1/float64(n))
-			// The first second's share is counted now; the rest in following ticks.
-			st.cur.add(&per, 1)
-			if n > 1 {
-				st.spreads = append(st.spreads, spread{perSec: per, left: n - 1})
-			}
-			a.in.add(&per, 1)
-			a.in.FlowRecords += 1 - per.FlowRecords // count the record once, now
-			st.cur.FlowRecords += 1 - per.FlowRecords
-			return
-		}
-		st.cur.add(&c, 1)
-		a.in.add(&c, 1)
+		a.account(st, &a.in, &c, r)
 		return
 	}
-	if _, ok := ps.Lookup(r.Src); ok {
-		a.out.add(&c, 1)
+	if p, ok := ps.Lookup(r.Src); ok {
+		st := a.srcs[r.Src]
+		if st == nil {
+			if len(a.srcs) >= a.cfg.MaxSrcs {
+				a.DroppedSrcs++
+				a.out.add(&c, 1)
+				return
+			}
+			st = &dstState{prefix: p}
+			a.srcs[r.Src] = st
+		}
+		st.cur.sources.add(r.Dst) // distinct outside targets
+		// The "source" tracked for a local sender is the outside address it sends to.
+		a.targets.add(r.Src, p, r.Dst, 0, &c, r.Proto, r.SrcPort, r.DstPort)
+		a.account(st, &a.out, &c, r)
 		return
 	}
 	a.unmatch.add(&c, 1)
+}
+
+// account adds a record to one address's current second and to the direction total, spreading
+// long flows over the following seconds.
+func (a *Aggregator) account(st *dstState, total *Counters, c *Counters, r *flow.Record) {
+	dur := time.Duration(r.DurationMs) * time.Millisecond
+	if dur > a.cfg.SpreadThreshold {
+		n := int(min(dur, a.cfg.MaxSpread) / time.Second)
+		var per Counters
+		per.add(c, 1/float64(n))
+		// The first second's share is counted now; the rest in following ticks.
+		st.cur.add(&per, 1)
+		if n > 1 {
+			st.spreads = append(st.spreads, spread{perSec: per, left: n - 1})
+		}
+		total.add(&per, 1)
+		total.FlowRecords += 1 - per.FlowRecords // count the record once, now
+		st.cur.FlowRecords += 1 - per.FlowRecords
+		return
+	}
+	st.cur.add(c, 1)
+	total.add(c, 1)
 }
 
 // Tick closes the current second and returns its statistics.
@@ -251,18 +285,31 @@ func (a *Aggregator) Tick(ts time.Time) Second {
 	s := Second{TS: ts, In: a.in, Out: a.out, Unmatched: a.unmatch}
 	s.InProv, s.OutProv = prov(&a.in), prov(&a.out)
 	a.in, a.out, a.unmatch = Counters{}, Counters{}, Counters{}
-	s.Dsts = make([]Dst, 0, len(a.dsts))
-	for ip, st := range a.dsts {
+	var pending int
+	s.Dsts, pending = closeSecond(a.dsts, &a.in)
+	s.SpreadPending += pending
+	s.Srcs, pending = closeSecond(a.srcs, &a.out)
+	s.SpreadPending += pending
+	a.in.FlowRecords, a.out.FlowRecords = 0, 0
+	return s
+}
+
+// closeSecond turns each address's current second into a Dst (sorted by packets desc), starts the
+// next second with the spread contributions of long flows (also added to `next`, the direction
+// total of the next second) and forgets idle addresses.
+func closeSecond(m map[netip.Addr]*dstState, next *Counters) ([]Dst, int) {
+	out := make([]Dst, 0, len(m))
+	pending := 0
+	for ip, st := range m {
 		if st.cur.Packets > 0 {
-			s.Dsts = append(s.Dsts, Dst{IP: ip, Prefix: st.prefix, C: st.cur,
+			out = append(out, Dst{IP: ip, Prefix: st.prefix, C: st.cur,
 				Sources: st.cur.sources.estimate(), Provenance: prov(&st.cur)})
 		}
-		// Next second starts with the spread contributions of long flows.
 		st.cur = Counters{}
 		kept := st.spreads[:0]
 		for _, sp := range st.spreads {
 			st.cur.add(&sp.perSec, 1)
-			a.in.add(&sp.perSec, 1)
+			next.add(&sp.perSec, 1)
 			sp.left--
 			if sp.left > 0 {
 				kept = append(kept, sp)
@@ -270,14 +317,13 @@ func (a *Aggregator) Tick(ts time.Time) Second {
 		}
 		st.cur.FlowRecords = 0
 		st.spreads = kept
-		s.SpreadPending += len(kept)
+		pending += len(kept)
 		if st.cur.Packets == 0 && len(kept) == 0 {
-			delete(a.dsts, ip) // idle destinations cost nothing
+			delete(m, ip) // idle addresses cost nothing
 		}
 	}
-	a.in.FlowRecords = 0
-	sort.Slice(s.Dsts, func(i, j int) bool { return s.Dsts[i].C.Packets > s.Dsts[j].C.Packets })
-	return s
+	sort.Slice(out, func(i, j int) bool { return out[i].C.Packets > out[j].C.Packets })
+	return out, pending
 }
 
 // Sources closes the source-tracking window ending at `end` and returns the busiest `topN`
@@ -286,6 +332,14 @@ func (a *Aggregator) Tick(ts time.Time) Second {
 func (a *Aggregator) Sources(end time.Time, minPPS float64, topN int, hot func(netip.Addr) bool) ([]SourceRow, []NetRow) {
 	rows := a.sources.flush(end, minPPS, topN, hot)
 	return rows, append([]NetRow(nil), a.sources.nets...)
+}
+
+// Targets is Sources for outbound traffic: for each local sender that averaged at least minPPS
+// (or for which hot(sender) is true), the busiest outside addresses it sent to, and their
+// networks. In the rows, Dst is the local sender and Src the outside target.
+func (a *Aggregator) Targets(end time.Time, minPPS float64, topN int, hot func(netip.Addr) bool) ([]SourceRow, []NetRow) {
+	rows := a.targets.flush(end, minPPS, topN, hot)
+	return rows, append([]NetRow(nil), a.targets.nets...)
 }
 
 func prov(c *Counters) string {

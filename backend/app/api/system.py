@@ -212,6 +212,11 @@ def _validate_setting(key: str, value):
         if not isinstance(value, bool):
             raise HTTPException(422, f"{key} must be a boolean")
     elif isinstance(default, int):
+        if key.startswith("outbound_"):   # 0 switches that one check off
+            hi = 100_000_000_000 if key == "outbound_bps" else 100_000_000
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > hi:
+                raise HTTPException(422, f"{key} must be an integer 0-{hi:,} (0 switches this check off)")
+            return
         if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value > 100_000:
             raise HTTPException(422, f"{key} must be an integer 1-100000")
 

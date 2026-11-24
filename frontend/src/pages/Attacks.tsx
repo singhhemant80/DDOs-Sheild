@@ -6,7 +6,7 @@ import { useAuth } from "../lib/auth";
 import { useApi } from "../lib/hooks";
 import { bps, count, dateTime, pps } from "../lib/format";
 import {
-  RESOLUTION_WORD, SEVERITY_TONE, STATUS_WORD, useLive, vectorName, type Incident,
+  RESOLUTION_WORD, SEVERITY_TONE, STATUS_WORD, isOutbound, useLive, vectorName, type Incident,
 } from "../lib/live";
 import { LiveChart } from "../components/LiveChart";
 import { IncidentMitigation } from "./Mitigation";
@@ -14,8 +14,8 @@ import { Num, ProvTag } from "../components/Provenance";
 import { Badge, Button, Dialog, ErrorLine, Field, Input, Lamp, Notice, PageHeader, Section, Select, Table } from "../components/ui";
 
 // ================================================================ shared bits
-const unitOf = (vector: string) => (vector === "volumetric_bps" ? "bps" : "pps");
-const rate = (v: number, unit: string) => (unit === "bps" ? bps(v) : pps(v));
+const unitOf = (vector: string) => (vector.endsWith("volumetric_bps") ? "bps" : vector === "out_scan" ? "targets" : "pps");
+const rate = (v: number, unit: string) => (unit === "bps" ? bps(v) : unit === "targets" ? `${count(v)} targets/s` : pps(v));
 
 export function duration(sec: number) {
   if (sec < 60) return `${sec} s`;
@@ -60,10 +60,16 @@ export function ConfidenceBar({ v, threshold = 0.7 }: { v: number; threshold?: n
   );
 }
 
+/** "Outbound" marker: the address is one of yours, sending the attack. */
+export function OutTag() {
+  return <Badge tone="warn" title="One of your addresses is sending this attack to the outside">Outbound</Badge>;
+}
+
 function Who({ i }: { i: Incident }) {
   return (
     <div>
-      <div className="font-medium">{i.scope === "prefix" ? `${i.target} (whole prefix)` : targetLabel(i.target)}</div>
+      <div className="font-medium">{i.scope === "prefix" ? `${i.target} (whole prefix)` : targetLabel(i.target)}
+        {isOutbound(i) && <> <OutTag /></>}</div>
       <div className="text-xs text-ink-3">
         {i.customer ? `${i.customer.customer_name ?? i.customer.customer_ref}, ${i.customer.service_type.toUpperCase()}` : i.prefix ?? "No customer assigned"}
       </div>
@@ -76,8 +82,10 @@ export function ActiveAttacks() {
   const { incidents, state } = useLive();
   const nav = useNavigate();
   const prefixes = useApi<{ enabled: boolean }[]>("/prefixes", 60_000);
-  const confirmed = incidents.filter((i) => i.status !== "suspected");
-  const suspected = incidents.filter((i) => i.status === "suspected");
+  const inbound = incidents.filter((i) => !isOutbound(i));
+  const outbound = incidents.filter(isOutbound);
+  const confirmed = inbound.filter((i) => i.status !== "suspected");
+  const suspected = inbound.filter((i) => i.status === "suspected");
   const cols = [
     { key: "sev", header: "Severity", render: (i: Incident) => <Lamp tone={SEVERITY_TONE[i.severity]} label={i.severity[0].toUpperCase() + i.severity.slice(1)} /> },
     { key: "t", header: "Target", render: (i: Incident) => <Who i={i} /> },
@@ -104,6 +112,12 @@ export function ActiveAttacks() {
         <Table rows={suspected} rowKey={(i) => i.id} onRow={(i) => nav(`/attacks/${i.id}`)} cols={cols}
           empty="Nothing unusual right now." />
       </Section>
+      <Section title={`Outbound: your addresses attacking others (${outbound.length})`}
+        aside="A customer machine in a botnet, or a server abused as a reflector" flush>
+        <Table rows={outbound} rowKey={(i) => i.id} onRow={(i) => nav(`/attacks/${i.id}`)}
+          cols={cols.map((c) => c.key === "t" ? { ...c, header: "Sending from" } : c)}
+          empty="None of your addresses is sending attack traffic." />
+      </Section>
     </div>
   );
 }
@@ -117,10 +131,12 @@ export function AttackHistory() {
   const [confirmedOnly, setConfirmedOnly] = useState(true);
   const [before, setBefore] = useState<string | null>(null);
   const [days, setDays] = useState("30");
+  const [dir, setDir] = useState("");
   const since = useMemo(() => days ? new Date(Date.now() - Number(days) * 86400_000).toISOString() : null, [days]);
   const params = new URLSearchParams({ state, limit: "100" });
   if (since) params.set("since", since);
   if (sev) params.set("severity", sev);
+  if (dir) params.set("direction", dir);
   if (q.trim()) params.set("q", q.trim());
   if (confirmedOnly) params.set("confirmed_only", "true");
   if (before) params.set("before", before);
@@ -134,6 +150,8 @@ export function AttackHistory() {
           onChange={(e) => { setQ(e.target.value); reset(); }} className="max-w-xs" />
         <Select aria-label="State" value={state} onChange={(v) => { setState(v); reset(); }}
           options={[["all", "Open and closed"], ["closed", "Closed only"], ["open", "Open only"]]} />
+        <Select aria-label="Direction" value={dir} onChange={(v) => { setDir(v); reset(); }}
+          options={[["", "Attacks on you and from you"], ["inbound", "Attacks on your addresses"], ["outbound", "Outbound (from your addresses)"]]} />
         <Select aria-label="Severity" value={sev} onChange={(v) => { setSev(v); reset(); }}
           options={[["", "Any severity"], ["critical", "Critical"], ["high", "High"], ["medium", "Medium"], ["low", "Low"]]} />
         <Select aria-label="Period" value={days} onChange={(v) => { setDays(v); reset(); }}
@@ -155,7 +173,7 @@ export function AttackHistory() {
             { key: "s", header: "Severity", render: (i) => <Lamp tone={SEVERITY_TONE[i.severity]} label={i.severity} /> },
             { key: "p", header: "Peak", align: "right", render: (i) => <><div>{pps(i.peak_pps)}</div><div className="text-xs text-ink-3">{bps(i.peak_bps)}</div></> },
             { key: "d", header: "Lasted", render: (i) => duration(i.duration_seconds) },
-            { key: "a", header: "Main source networks", render: (i) => i.top_asns?.length
+            { key: "a", header: "Main networks (sources, or targets for outbound)", render: (i) => i.top_asns?.length
                 ? <div className="space-y-0.5 text-[13px]">{i.top_asns.slice(0, 2).map((a) => (
                     <div key={a.asn} className="truncate" title={a.as_name ?? ""}>AS{a.asn} <span className="text-ink-2">{shortName(a.as_name)}</span>
                       {a.share != null && <span className="text-ink-3"> {Math.round(a.share * 100)}%</span>}</div>))}</div>
@@ -216,7 +234,7 @@ const share = (v: number | null | undefined) => v == null ? "–" : `${(v * 100)
 const flag = (cc: string) => cc && /^[A-Z]{2}$/.test(cc)
   ? String.fromCodePoint(...[...cc].map((c) => 0x1f1a5 + c.charCodeAt(0))) : "";
 
-function AttackSources({ id, vectors, open }: { id: string; vectors: string[]; open: boolean }) {
+function AttackSources({ id, vectors, open, outbound }: { id: string; vectors: string[]; open: boolean; outbound?: boolean }) {
   const s = useApi<Sources>(`/attacks/${id}/sources`, open ? 20_000 : 0);
   const [all, setAll] = useState(false);
   const d = s.data;
@@ -233,10 +251,13 @@ function AttackSources({ id, vectors, open }: { id: string; vectors: string[]; o
     a.click();
   };
   return (
-    <Section title="Where the traffic came from" aside={d?.available ? <Button variant="quiet" onClick={csv}>Download CSV</Button> : undefined}>
+    <Section title={outbound ? "Where it is sending to" : "Where the traffic came from"}
+      aside={d?.available ? <Button variant="quiet" onClick={csv}>Download CSV</Button> : undefined}>
       {!d ? <p className="text-sm text-ink-2">Loading…</p>
         : !d.available ? <Notice>{d.reason ? `Source data unavailable (${d.reason}).`
+            : outbound ? "No target data was recorded for this incident. Shield records the targets of outbound attacks from version 1.1.0 on, while flow data for outgoing traffic is arriving."
             : "No source data was recorded for this incident. Shield records sources from version 0.8.2 on, for addresses under attack or above 5,000 packets/s, while flow data is arriving."}</Notice>
+        : outbound ? <OutboundTargets d={d} all={all} setAll={setAll} />
         : <div className="space-y-4">
           <p className="text-sm text-ink-2">
             {d.networks_cover_all
@@ -328,7 +349,10 @@ export function AttackDetail() {
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <div className="flex flex-wrap items-center gap-3">
-            <h1 className="wide text-[28px] font-semibold leading-tight">{inc.scope === "prefix" ? inc.target : targetLabel(inc.target)}</h1>
+            <h1 className="wide text-[28px] font-semibold leading-tight">
+              {isOutbound(inc) && <span className="text-ink-2">Outbound attack from </span>}
+              {inc.scope === "prefix" ? inc.target : targetLabel(inc.target)}</h1>
+            {isOutbound(inc) && <OutTag />}
             <StatusPill i={inc} />
             <Lamp tone={SEVERITY_TONE[inc.severity]} label={`${inc.severity[0].toUpperCase()}${inc.severity.slice(1)} severity`} />
           </div>
@@ -350,7 +374,7 @@ export function AttackDetail() {
       <ErrorLine error={err} />
       {inc.acknowledged_at && <p className="text-sm text-ink-2">Acknowledged by {inc.acknowledged_by} at {dateTime(inc.acknowledged_at)}.</p>}
 
-      <Section title="Traffic to the target" aside={series.data?.available === false ? undefined
+      <Section title={isOutbound(inc) ? "Traffic sent by this address" : "Traffic to the target"} aside={series.data?.available === false ? undefined
         : series.data?.resolution === "1m" ? "1-minute averages (per-second data is kept 30 days)" : "From 5 minutes before detection"}>
         {series.data?.available === false
           ? <Notice tone="warn">Stored traffic history is unavailable ({series.data.reason}).</Notice>
@@ -369,7 +393,7 @@ export function AttackDetail() {
             <Stat k="Rate now" v={<Num v={inc.current?.pps} p={open ? inc.current?.provenance ?? "sampled" : "unavailable"} fmt={pps} />} />
             <Stat k="Peak" v={pps(inc.peak_pps)} />
             <Stat k="Bandwidth peak" v={bps(inc.peak_bps)} />
-            <Stat k="Sources" v={inc.current && "sources_est" in inc.current ? `≈${count((inc.current as any).sources_est)}` : "–"} />
+            <Stat k={isOutbound(inc) ? "Targets" : "Sources"} v={inc.current && "sources_est" in inc.current ? `≈${count((inc.current as any).sources_est)}` : "–"} />
           </dl>
           <div className="mt-4">
             <div className="mb-1.5 text-sm font-medium">Attack type</div>
@@ -407,7 +431,7 @@ export function AttackDetail() {
         </Section>
       </div>
 
-      <AttackSources id={inc.id} vectors={inc.vectors} open={!!open} />
+      <AttackSources id={inc.id} vectors={inc.vectors} open={!!open} outbound={isOutbound(inc)} />
 
       <div className="grid gap-5 xl:grid-cols-[1.4fr_1fr]">
         <Section title="Timeline" flush>
@@ -424,8 +448,8 @@ export function AttackDetail() {
             ))}
           </ol>
         </Section>
-        <Section title="Mitigation">
-          {inc.eligibility?.protected_prefix ? (
+        <Section title={isOutbound(inc) ? "What to do" : "Mitigation"}>
+          {isOutbound(inc) ? <OutboundAdvice inc={inc} /> : inc.eligibility?.protected_prefix ? (
             <div className="space-y-3 text-sm">
               <div className="flex flex-wrap gap-2">
                 <Badge tone={inc.eligibility.rtbh_allowed ? "ok" : "neutral"}>Blackhole {inc.eligibility.rtbh_allowed ? "allowed" : "not allowed"}</Badge>
@@ -511,5 +535,77 @@ function NoteDialog({ open, onClose, onDone, id }: { open: boolean; onClose: () 
         <Field label="Note"><Input required value={note} onChange={(e) => setNote(e.target.value)} /></Field>
       </form>
     </Dialog>
+  );
+}
+
+/** Targets of an outbound attack: the outside addresses and networks your address sent to. */
+function OutboundTargets({ d, all, setAll }: { d: Sources; all: boolean; setAll: (v: boolean) => void }) {
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-ink-2">
+        {d.distinct_sources?.toLocaleString()} outside addresses recorded, covering {share(d.listed_share)} of what this address sent.
+        Up to {d.max_sources_per_window?.toLocaleString()} different targets were hit within 10 seconds.{d.stored && " Saved when the incident closed."}
+      </p>
+      <div className="grid gap-5 xl:grid-cols-[1.3fr_1fr]">
+        <div>
+          <div className="mb-1.5 text-sm font-medium">Target networks (AS)</div>
+          <Table dense rows={d.asns} rowKey={(a) => String(a.asn)} empty="–" cols={[
+            { key: "a", header: "AS", render: (a) => a.asn == null ? <span className="text-ink-3">Unknown</span>
+                : <a className="text-signal hover:underline" href={`https://bgp.tools/as/${a.asn}`} target="_blank" rel="noreferrer">AS{a.asn}</a> },
+            { key: "n", header: "Name", render: (a) => <span title={a.as_name ?? ""}>{flag(a.country)} {shortName(a.as_name)}</span> },
+            { key: "s", header: "Targets", align: "right", render: (a) => a.sources.toLocaleString() },
+            { key: "h", header: "Share", align: "right", render: (a) => share(a.share) },
+          ]} />
+        </div>
+        <div>
+          <div className="mb-1.5 text-sm font-medium">Target countries</div>
+          <Table dense rows={d.countries} rowKey={(c) => c.country} empty="–" cols={[
+            { key: "c", header: "Country", render: (c) => <>{flag(c.country)} {c.country}</> },
+            { key: "s", header: "Targets", align: "right", render: (c) => c.sources.toLocaleString() },
+            { key: "h", header: "Share", align: "right", render: (c) => share(c.share) },
+          ]} />
+        </div>
+      </div>
+      <div>
+        <div className="mb-1.5 text-sm font-medium">Target addresses</div>
+        <Table dense rows={all ? d.sources : d.sources.slice(0, 20)} rowKey={(r) => r.ip} cols={[
+          { key: "i", header: "Address", render: (r) => <span className="font-mono text-[13px]">{r.ip}</span> },
+          { key: "a", header: "Network", render: (r) => r.asn == null ? <span className="text-ink-3">–</span>
+              : <span title={r.as_name ?? ""}>AS{r.asn} <span className="text-ink-2">{shortName(r.as_name)}</span></span> },
+          { key: "c", header: "Country", render: (r) => <>{flag(r.country)} {r.country}</> },
+          { key: "t", header: "Traffic", render: (r) => <span className="text-ink-2">{r.proto}{r.src_port ? ` from port ${r.src_port}` : ""}{r.dst_port ? ` to port ${r.dst_port}` : ""}</span> },
+          { key: "p", header: "Peak", align: "right", render: (r) => <><div>{pps(r.peak_pps)}</div><div className="text-xs text-ink-3">{bps(r.peak_bps)}</div></> },
+          { key: "h", header: "Share", align: "right", render: (r) => share(r.share) },
+        ]} />
+        {d.sources.length > 20 && <Button variant="quiet" onClick={() => setAll(!all)}>{all ? "Show the top 20" : `Show all ${d.sources.length}`}</Button>}
+      </div>
+    </div>
+  );
+}
+
+/** Outbound incidents are not mitigated by Shield (its actions protect your addresses from
+ *  incoming traffic); this says what the operator should do instead. */
+function OutboundAdvice({ inc }: { inc: Detail }) {
+  const ip = targetLabel(inc.target);
+  const reflector = inc.vectors.some((v) => v.endsWith("_reflector"));
+  const scan = inc.vectors.includes("out_scan");
+  return (
+    <div className="space-y-3 text-sm">
+      <p>
+        <strong>{ip}</strong> is one of your addresses
+        {inc.customer ? <> ({inc.customer.customer_name ?? inc.customer.customer_ref}, {inc.customer.service_type.toUpperCase()})</> : null}
+        {" "}and is <strong>sending</strong> this traffic to the outside. Shield does not blackhole or filter it automatically.
+      </p>
+      <ol className="list-decimal space-y-1.5 pl-5 text-ink-2">
+        {reflector
+          ? <li>The server answers spoofed requests and amplifies them at someone else. Close the open service
+              (for DNS: recursion only for your own networks; for NTP: disable monlist; for memcached/SSDP/CLDAP: not reachable from the internet).</li>
+          : <li>The machine is probably compromised (botnet) or misused{scan ? " to scan the internet" : ""}. Contact the customer or isolate the VM.</li>}
+        <li>To stop it at once, drop its outgoing traffic on the router (in Safe Mode):
+          <pre className="mt-1.5 overflow-x-auto rounded-[3px] bg-sunk p-2 font-mono text-[12px] text-ink">{`/ip/firewall/raw add chain=prerouting src-address=${ip} action=drop comment="shield-manual: outbound attack ${inc.id.slice(0, 8)}"`}</pre>
+          and remove the rule when the machine is clean.</li>
+        <li>Your upstream providers may send an abuse report for this address: the targets listed in "Where it is sending to" are what they will list.</li>
+      </ol>
+    </div>
   );
 }

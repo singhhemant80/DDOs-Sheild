@@ -94,8 +94,8 @@ const toneCls: Record<Tone, string> = {
   signal: "bg-signal-soft text-signal",
 };
 
-export function Badge({ tone = "neutral", children }: { tone?: Tone; children: ReactNode }) {
-  return <span className={`inline-flex items-center gap-1 rounded-[2px] px-1.5 py-px text-xs font-medium ${toneCls[tone]}`}>{children}</span>;
+export function Badge({ tone = "neutral", children, title }: { tone?: Tone; children: ReactNode; title?: string }) {
+  return <span title={title} className={`inline-flex items-center gap-1 rounded-[2px] px-1.5 py-px text-xs font-medium ${toneCls[tone]}`}>{children}</span>;
 }
 
 /** Status lamp: a filled dot reads faster than a word on a wall display. */

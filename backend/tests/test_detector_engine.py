@@ -253,3 +253,74 @@ def test_baseline_not_learned_during_an_incident():
     start = T0 - T0 % 3600
     run(eng, 5 * 60, start, lambda i: [dst(VICTIM, 1_000_000)])
     assert not [k for k in bl.stats if k[0] == VKEY]
+
+
+# ---------------------------------------------------------------- outbound (local senders)
+from app.detector.engine import Outbound  # noqa: E402
+
+OB = Outbound.from_settings(lambda k, d: d)   # the defaults
+SENDER = "163.5.191.77"
+SKEY = "out:163.5.191.77/32"
+
+
+def out_engine():
+    return Engine(ProfileSet([V4, V6]), None, OB)
+
+
+def snap(ts, dsts=(), srcs=()):
+    return {"ts": ts, "dsts": list(dsts), "srcs": list(srcs)}
+
+
+def test_outbound_syn_flood_from_a_customer_is_confirmed():
+    eng = out_engine()
+    evs = []
+    for i in range(40):
+        evs += eng.tick(snap(T0 + i, srcs=[dst(SENDER, 60_000, proto="tcp", syn=60_000, size=60, sources=1)]))
+    conf = first(evs, "confirmed")
+    assert conf.key == SKEY and conf.scope == "outbound" and "out_syn_flood" in conf.vectors
+    assert VKEY not in eng.tracks          # nothing inbound
+
+
+def test_outbound_open_resolver_is_a_dns_reflector():
+    eng = out_engine()
+    evs = []
+    for i in range(40):
+        evs += eng.tick(snap(T0 + i, srcs=[dst(SENDER, 8_000, reflect={"53": 8_000}, size=1400, sources=3000)]))
+    assert first(evs, "confirmed").vectors[0] == "dns_reflector"
+
+
+def test_outbound_scan_is_detected_at_low_rate():
+    eng = out_engine()
+    evs = []
+    for i in range(40):  # 2,000 pps but 2,000 distinct targets per second
+        evs += eng.tick(snap(T0 + i, srcs=[dst(SENDER, 2_000, proto="tcp", syn=2_000, size=60, sources=2_000)]))
+    assert "out_scan" in first(evs, "confirmed").vectors
+
+
+def test_outbound_normal_traffic_and_switched_off():
+    eng = out_engine()
+    evs = []
+    for i in range(120):   # a busy web server: lots of traffic, few targets, no flood signature
+        evs += eng.tick(snap(T0 + i, srcs=[dst(SENDER, 20_000, proto="tcp", size=1400, sources=200)]))
+    assert evs == []
+    off = Engine(ProfileSet([V4, V6]), None, None)
+    evs = []
+    for i in range(40):
+        evs += off.tick(snap(T0 + i, srcs=[dst(SENDER, 200_000, proto="tcp", syn=200_000, size=60, sources=1)]))
+    assert evs == [] and off.tracks == {}
+
+
+def test_inbound_and_outbound_of_one_address_are_separate():
+    eng = out_engine()
+    evs = []
+    for i in range(40):
+        evs += eng.tick(snap(T0 + i, dsts=[dst(SENDER, 1_000_000, size=512)],
+                             srcs=[dst(SENDER, 60_000, proto="tcp", syn=60_000, size=60, sources=1)]))
+    keys = {e.key for e in evs if e.kind == "confirmed"}
+    assert keys == {"163.5.191.77/32", SKEY}
+
+
+def test_outbound_settings():
+    ob = Outbound.from_settings(lambda k, d: {"outbound_syn_pps": 2_000, "outbound_scan_targets": 0}.get(k, d))
+    assert ob.profile.syn_pps == 2_000 and ob.scan_targets is None
+    assert Outbound.from_settings(lambda k, d: False if k == "outbound_detection" else d) is None

@@ -38,7 +38,9 @@ export type Dst = {
   syn_pps: number; ack_pps: number; rst_pps: number; frag_pps: number;
   reflect?: Record<string, number>; sources_est: number; provenance: Provenance;
 };
-export type Snapshot = { ts: number; in: Rates; out: Rates; dsts: Dst[]; dst_count: number };
+/** srcs: local addresses sending OUT of the protected prefixes ("ip" = the local sender,
+ *  "sources_est" = distinct outside targets). Older collectors do not send it. */
+export type Snapshot = { ts: number; in: Rates; out: Rates; dsts: Dst[]; dst_count: number; srcs?: Dst[]; src_count?: number };
 export type HistoryPoint = {
   ts: number; in_pps: number; in_bps: number; out_pps: number; out_bps: number;
   tcp_pps: number; udp_pps: number; icmp_pps: number; other_pps: number; provenance: Provenance;

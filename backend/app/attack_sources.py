@@ -25,8 +25,16 @@ UNKNOWN_ASN, OTHER_ASN = 4294967294, 4294967295   # collector asndb.Unknown / as
 PROTO = {1: "ICMP", 6: "TCP", 17: "UDP", 47: "GRE", 50: "ESP", 58: "ICMPv6"}
 
 
+def _tables(inc: AttackIncident) -> tuple[str, str, str]:
+    """(per-peer table, per-network table, per-second table). For an outbound incident the
+    "sources" are the outside TARGETS the local sender sent to."""
+    if getattr(inc, "direction", "inbound") == "outbound":
+        return "out_targets_10s", "out_asn_10s", "out_1s"
+    return "src_10s", "asn_10s", "dst_1s"
+
+
 def _where(inc: AttackIncident) -> tuple[str, dict]:
-    if inc.scope == "host":
+    if inc.scope == "host" or getattr(inc, "direction", "inbound") == "outbound":
         return "dst = {dst:String}", {"dst": str(ipaddress.ip_network(str(inc.target)).network_address)}
     return "prefix = {prefix:String}", {"prefix": str(inc.target)}
 
@@ -36,24 +44,25 @@ def summarize(inc: AttackIncident) -> dict:
     start = int(inc.first_detected_at.timestamp()) - 60
     end = int((inc.resolved_at or datetime.now(UTC)).timestamp()) + WINDOW_SECONDS
     cond, params = _where(inc)
+    peers, networks, seconds = _tables(inc)
     params |= {"since": tm.utc(start), "until": tm.utc(end), "w": WINDOW_SECONDS}
     rows = tm.ch_query(f"""
         SELECT src, max(src_as) AS exported_as, sum(pps) * {{w:UInt32}} AS packets,
                sum(bps) * {{w:UInt32}} / 8 AS bytes, max(pps) AS peak_pps, max(bps) AS peak_bps,
                argMax(proto, pps) AS proto, argMax(src_port, pps) AS src_port, argMax(dst_port, pps) AS dst_port,
                count() AS windows, min(ts) AS first_seen, max(ts) AS last_seen
-        FROM src_10s WHERE {cond} AND ts >= {{since:DateTime('UTC')}} AND ts <= {{until:DateTime('UTC')}}
+        FROM {peers} WHERE {cond} AND ts >= {{since:DateTime('UTC')}} AND ts <= {{until:DateTime('UTC')}}
         GROUP BY src ORDER BY packets DESC LIMIT 5000""", params)
     agg = tm.ch_query(f"""
         SELECT max(sources) AS max_sources
-        FROM src_10s WHERE {cond} AND ts >= {{since:DateTime('UTC')}} AND ts <= {{until:DateTime('UTC')}}""", params)
+        FROM {peers} WHERE {cond} AND ts >= {{since:DateTime('UTC')}} AND ts <= {{until:DateTime('UTC')}}""", params)
     nets = tm.ch_query(f"""
         SELECT asn, any(country) AS country, sum(pps) * {{w:UInt32}} AS packets, sum(bps) * {{w:UInt32}} / 8 AS bytes,
                max(sources) AS sources
-        FROM asn_10s WHERE {cond} AND ts >= {{since:DateTime('UTC')}} AND ts <= {{until:DateTime('UTC')}}
+        FROM {networks} WHERE {cond} AND ts >= {{since:DateTime('UTC')}} AND ts <= {{until:DateTime('UTC')}}
         GROUP BY asn ORDER BY packets DESC LIMIT 1000""", params)
     tot = tm.ch_query(f"""
-        SELECT sum(pps) AS packets FROM dst_1s
+        SELECT sum(pps) AS packets FROM {seconds}
         WHERE {cond} AND ts >= {{since:DateTime('UTC')}} AND ts <= {{until:DateTime('UTC')}}""", params)
     table = asndb.table()
     total_packets = float((tot[0] if tot else {}).get("packets") or 0)
@@ -119,6 +128,7 @@ def summarize(inc: AttackIncident) -> dict:
         s["share"] = share(s["packets"])
     a0 = agg[0] if agg else {}
     return {
+        "direction": getattr(inc, "direction", "inbound"),
         "available": bool(rows), "computed_at": datetime.now(UTC).isoformat(), "from": tm.utc(start), "to": tm.utc(end),
         "total_packets": round(total_packets), "listed_packets": round(listed),
         "listed_share": share(listed), "distinct_sources": len(rows), "networks_cover_all": full,

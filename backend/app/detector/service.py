@@ -34,7 +34,7 @@ from ..models import (
     OPEN_INCIDENT_STATES, AttackIncident, AttackIncidentEvent, CustomerIpAssignment, DetectionEvidence,
     DetectionProfile, IncidentStatus, ProtectedPrefix, TrafficBaseline,
 )
-from .engine import Baselines, Engine, Event, Profile, ProfileSet
+from .engine import OUTBOUND_KEY, Baselines, Engine, Event, Outbound, Profile, ProfileSet
 
 log = logging.getLogger("shield.detector")
 
@@ -65,6 +65,21 @@ def load_profiles(db: Session) -> ProfileSet:
     return ProfileSet([Profile.from_row(r) for r in rows], overrides)
 
 
+def load_outbound(db: Session) -> Outbound | None:
+    return Outbound.from_settings(lambda k, d: get_setting(db, k, d))
+
+
+def split_key(key: str) -> tuple[str, str]:
+    """Engine key -> (incident target, direction)."""
+    if key.startswith(OUTBOUND_KEY):
+        return key[len(OUTBOUND_KEY):], "outbound"
+    return key, "inbound"
+
+
+def engine_key(target: str, direction: str) -> str:
+    return OUTBOUND_KEY + target if direction == "outbound" else target
+
+
 def load_baselines(db: Session) -> Baselines:
     bl = Baselines()
     for r in db.execute(select(TrafficBaseline).where(TrafficBaseline.metric == "pps")).scalars():
@@ -92,7 +107,7 @@ class DetectorService:
         self.rds = rds or redis.Redis.from_url(tm.get_settings().redis_url, decode_responses=True,
                                                socket_timeout=10, socket_connect_timeout=3)
         with self.sf() as db:
-            self.engine = Engine(load_profiles(db), load_baselines(db))
+            self.engine = Engine(load_profiles(db), load_baselines(db), load_outbound(db))
             self.fp_suppress = int(get_setting(db, "false_positive_suppress_minutes", 30)) * 60
         self.incidents: dict[str, uuid.UUID] = {}   # engine key -> incident id
         self.evidence_count: dict[uuid.UUID, int] = {}
@@ -113,13 +128,13 @@ class DetectorService:
         with self.sf() as db:
             rows = db.execute(select(AttackIncident).where(AttackIncident.status.in_(OPEN_INCIDENT_STATES))).scalars().all()
             for r in rows:
-                key = str(r.target)
+                key = engine_key(str(r.target), r.direction)
                 prefix = None
                 if r.protected_prefix_id:
                     pp = db.get(ProtectedPrefix, r.protected_prefix_id)
                     prefix = str(pp.prefix) if pp else None
                 self.engine.restore(
-                    key, r.scope, prefix, r.status.value, int(r.first_detected_at.timestamp()),
+                    key, "outbound" if r.direction == "outbound" else r.scope, prefix, r.status.value, int(r.first_detected_at.timestamp()),
                     int(r.confirmed_at.timestamp()) if r.confirmed_at else None, r.severity.value, list(r.vectors),
                     float(r.confidence), float(r.peak_pps or 0), float(r.peak_bps or 0))
                 self.incidents[key] = r.id
@@ -259,15 +274,18 @@ class DetectorService:
                 d.pop(iid, None)
 
     def _open(self, db: Session, e: Event) -> uuid.UUID:
+        target, direction = split_key(e.key)
         pp_id = db.execute(select(ProtectedPrefix.id).where(
-            cast(e.key, CIDR).op("<<=")(ProtectedPrefix.prefix))).scalar()
+            cast(target, CIDR).op("<<=")(ProtectedPrefix.prefix))).scalar()
         existing = db.execute(select(AttackIncident).where(
-            AttackIncident.target == e.key, AttackIncident.status.in_(OPEN_INCIDENT_STATES))).scalar_one_or_none()
+            AttackIncident.target == target, AttackIncident.direction == direction,
+            AttackIncident.status.in_(OPEN_INCIDENT_STATES))).scalar_one_or_none()
         if existing is not None:   # already open (e.g. restored with different state): reuse it
             self.incidents[e.key] = existing.id
             return existing.id
         inc = AttackIncident(
-            target=e.key, scope=e.scope, protected_prefix_id=pp_id, status=IncidentStatus.SUSPECTED,
+            target=target, direction=direction, scope="host" if direction == "outbound" else e.scope,
+            protected_prefix_id=pp_id, status=IncidentStatus.SUSPECTED,
             severity=e.severity, vectors=e.vectors, confidence=Decimal(str(e.confidence)),
             peak_pps=int(e.peak_pps), peak_bps=int(e.peak_bps), peak_provenance=e.sample["provenance"],
             first_detected_at=_dt(e.started_ts or e.ts), last_hot_at=_dt(e.ts), profile_id=e.profile_id or None,
@@ -303,8 +321,10 @@ class DetectorService:
 
     # ------------------------------------------------------------ live events
     def _publish(self, inc: AttackIncident, kind: str, e: Event) -> None:
+        target, direction = split_key(e.key)
         msg = {"type": "incident", "event": kind, "incident": {
-            "id": str(inc.id), "target": e.key, "scope": e.scope, "prefix": e.prefix,
+            "id": str(inc.id), "target": target, "direction": direction,
+            "scope": "host" if direction == "outbound" else e.scope, "prefix": e.prefix,
             "status": "resolved" if kind == "resolved" else e.status, "severity": e.severity,
             "vectors": e.vectors, "confidence": e.confidence, "current_confidence": e.current_confidence,
             "peak_pps": e.peak_pps, "peak_bps": e.peak_bps, "pps": e.sample["pps"], "bps": e.sample["bps"],
@@ -322,8 +342,11 @@ class DetectorService:
               "lag_seconds": round(time.time() - self.last_snapshot_ts, 1) if self.last_snapshot_ts else None}
         try:
             self.rds.set(KEY_STATUS, json.dumps(st), ex=15)
-            # The collector stores the sources of these targets at any rate (attack history).
-            self.rds.set(KEY_HOT, json.dumps({"targets": sorted(self.incidents)}), ex=30)
+            # The collector stores the sources of these targets (and the targets of these local
+            # senders) at any rate, for the attack history.
+            keys = [split_key(k) for k in self.incidents]
+            self.rds.set(KEY_HOT, json.dumps({"targets": sorted(t for t, d in keys if d == "inbound"),
+                                              "senders": sorted(t for t, d in keys if d == "outbound")}), ex=30)
         except redis.RedisError:
             pass
 
@@ -341,7 +364,7 @@ class DetectorService:
 
     def _reload_profiles(self) -> None:
         with self.sf() as db:
-            self.engine.set_profiles(load_profiles(db))
+            self.engine.set_profiles(load_profiles(db), load_outbound(db))
             self.fp_suppress = int(get_setting(db, "false_positive_suppress_minutes", 30)) * 60
 
     def _sync_external(self) -> None:

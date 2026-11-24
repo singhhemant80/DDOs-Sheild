@@ -587,10 +587,16 @@ class AttackIncident(TimestampMixin, Base):
     # Who sent the traffic: top sources, networks (AS) and countries, stored when the incident
     # closes so it outlives the per-source flow data (90 days).
     sources_summary: Mapped[dict | None] = mapped_column(JSONB)
+    # inbound: traffic TO the target (an attack on you). outbound: traffic FROM the target, one of
+    # your own addresses, to the outside (your customer attacking others); always scope host.
+    # For outbound, sources_summary lists the outside TARGETS it sent to.
+    direction: Mapped[str] = mapped_column(String(8), nullable=False, server_default="inbound", default="inbound")
 
     __table_args__ = (
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_incident_confidence"),
         CheckConstraint("scope IN ('host', 'prefix')", name="ck_incident_scope"),
+        CheckConstraint("direction IN ('inbound', 'outbound')", name="ck_incident_direction"),
+        Index("ix_incidents_direction", "direction"),
         CheckConstraint(
             "resolution IS NULL OR resolution IN ('ended', 'cleared_unconfirmed', 'false_positive', 'superseded')",
             name="ck_incident_resolution"),
@@ -598,7 +604,7 @@ class AttackIncident(TimestampMixin, Base):
         Index("ix_incidents_first_detected", "first_detected_at"),
         Index("ix_incidents_target_gist", "target", postgresql_using="gist", postgresql_ops={"target": "inet_ops"}),
         # At most one open incident per target: the detector updates it rather than opening duplicates.
-        Index("uq_incidents_open_target", "target", unique=True,
+        Index("uq_incidents_open_target", "target", "direction", unique=True,
               postgresql_where=text("status IN ('suspected','confirmed','mitigating','mitigated')")),
     )
 
@@ -1023,6 +1029,14 @@ DEFAULT_SETTINGS: dict[str, tuple[object, str]] = {
     "filter_max_rules": (50, "Hard ceiling on Shield's firewall drop rules across all routers."),
     "steering_backend": ("simulated", "Where steering rules go: 'simulated' (nothing changes on any router) or 'routeros' (Shield's filter account adds its own rules to the BGP output filter towards an upstream)."),
     "dashboard_url": ("", "Address of this dashboard (e.g. https://shield.example.net), used for links in alerts."),
+    "outbound_detection": (True, "Detect attacks sent FROM your own addresses to the outside (a customer machine in a botnet, an open resolver used as an amplifier). Needs flow export for outgoing traffic."),
+    "outbound_pps": (50000, "Outbound: packets per second sent by one local address that count as an attack."),
+    "outbound_bps": (500000000, "Outbound: bits per second sent by one local address that count as an attack."),
+    "outbound_syn_pps": (10000, "Outbound: TCP SYN packets per second sent by one local address (SYN flood)."),
+    "outbound_udp_pps": (30000, "Outbound: UDP packets per second sent by one local address (UDP flood)."),
+    "outbound_icmp_pps": (10000, "Outbound: ICMP packets per second sent by one local address (ICMP flood)."),
+    "outbound_reflect_pps": (5000, "Outbound: UDP packets per second answered from a reflection port (DNS 53, NTP 123, SSDP 1900, ...): your server is being used as an amplifier."),
+    "outbound_scan_targets": (500, "Outbound: distinct outside addresses contacted per second by one local address (scanning)."),
     "scrubbing_backend": ("simulated", "Where scrubbing requests go: 'simulated' (no provider is called) or 'live' (Shield calls the provider's API)."),
     "steering_max_rules": (20, "Hard ceiling on Shield's steering rules across all upstreams."),
     "bgp_production_enabled": (False, "Production BGP sessions are configured and may carry blackholes (each only after its acceptance run passes). Changed only through its own switch."),

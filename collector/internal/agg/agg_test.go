@@ -191,3 +191,66 @@ func TestSourcesTopPerDestination(t *testing.T) {
 		t.Fatalf("empty window should give nothing, got %+v", rows)
 	}
 }
+
+func TestOutboundSendersAndTargets(t *testing.T) {
+	a := New(Config{}, holder("163.5.191.0/24", "77.107.95.0/24"))
+	bot := netip.MustParseAddr("163.5.191.77")
+	// A customer machine SYN-flooding one outside address, from many source ports.
+	for i := 0; i < 5; i++ {
+		r := rec("163.5.191.77", netip.MustParseAddr("203.0.113.10"), 6, 100, 6000, 10)
+		r.TCPFlags, r.SrcPort, r.DstPort = flow.TCPSyn, uint16(40000+i), 443
+		a.Add(r)
+	}
+	// An open resolver inside the network answering spoofed queries: UDP FROM port 53.
+	for i := 0; i < 50; i++ {
+		r := rec("77.107.95.53", netip.AddrFrom4([4]byte{198, 18, 0, byte(i)}), 17, 20, 30000, 10)
+		r.SrcPort = 53
+		a.Add(r)
+	}
+	// Inside to inside stays inbound only; outside to outside is not ours.
+	a.Add(rec("163.5.191.77", victim, 17, 1, 100, 1))
+	a.Add(rec("8.8.4.4", netip.MustParseAddr("8.8.8.8"), 6, 1, 1, 1))
+	s := a.Tick(ts)
+	if len(s.Srcs) != 2 || s.Srcs[0].IP.String() != "77.107.95.53" || s.Srcs[1].IP != bot {
+		t.Fatalf("senders %+v", s.Srcs)
+	}
+	res, syn := s.Srcs[0], s.Srcs[1]
+	if res.C.Reflect[0] != 10_000 || res.Prefix.String() != "77.107.95.0/24" || math.Abs(res.Sources-50) > 3 {
+		t.Fatalf("resolver %+v sources %v", res.C, res.Sources)
+	}
+	if syn.C.SYN != 5000 || math.Abs(syn.Sources-1) > 0.5 || s.Out.Packets != 15_000 {
+		t.Fatalf("syn sender %+v out %v", syn.C, s.Out.Packets)
+	}
+	if len(s.Dsts) != 1 || s.Dsts[0].IP != victim {
+		t.Fatalf("inside-to-inside must be inbound: %+v", s.Dsts)
+	}
+	rows, nets := a.Targets(a.targets.start.Add(10*time.Second), 100, 3, nil)
+	var botRows []SourceRow
+	for _, r := range rows {
+		if r.Dst == bot {
+			botRows = append(botRows, r)
+		}
+	}
+	if len(botRows) != 1 || botRows[0].Src.String() != "203.0.113.10" || botRows[0].DstPort != 443 ||
+		math.Abs(botRows[0].PPS-500) > 1e-6 {
+		t.Fatalf("targets of the SYN sender %+v", botRows)
+	}
+	if len(nets) == 0 {
+		t.Fatal("target networks missing")
+	}
+	// Idle senders are forgotten.
+	if s2 := a.Tick(ts.Add(time.Second)); len(s2.Srcs) != 0 || len(a.srcs) != 0 {
+		t.Fatalf("idle senders kept: %+v", s2.Srcs)
+	}
+}
+
+func TestMaxSrcsBound(t *testing.T) {
+	a := New(Config{MaxSrcs: 2}, holder("163.5.191.0/24"))
+	for i := 1; i <= 3; i++ {
+		a.Add(rec("163.5.191."+string(rune('0'+i)), netip.MustParseAddr("8.8.8.8"), 17, 1, 100, 1))
+	}
+	s := a.Tick(ts)
+	if len(s.Srcs) != 2 || a.DroppedSrcs != 1 || s.Out.Packets != 3 {
+		t.Fatalf("srcs=%d dropped=%d out=%v", len(s.Srcs), a.DroppedSrcs, s.Out.Packets)
+	}
+}

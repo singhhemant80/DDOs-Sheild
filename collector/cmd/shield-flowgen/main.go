@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"time"
 
 	"shield/collector/internal/encode"
@@ -39,6 +40,11 @@ var scenarios = map[string]scenario{
 	"carpet": {name: "carpet", baseline: 20_000, attack: 1_000_000, kind: "carpet", sources: 5000, pktSize: 512},
 	// A legitimate spike: many real clients, normal TCP mix, to exercise false-positive handling (Phase 4).
 	"flash-crowd": {name: "flash-crowd", baseline: 20_000, attack: 150_000, kind: "web", sources: 15000, pktSize: 900},
+	// Outbound (v1.1.0): -victim is the LOCAL address sending; "sources" are its outside targets.
+	"out-syn-flood":     {name: "out-syn-flood", baseline: 20_000, attack: 80_000, kind: "out-syn", sources: 3, pktSize: 60},
+	"out-udp-flood":     {name: "out-udp-flood", baseline: 20_000, attack: 120_000, kind: "out-udp", sources: 2, pktSize: 1200},
+	"out-dns-reflector": {name: "out-dns-reflector", baseline: 20_000, attack: 30_000, kind: "out-dns", sources: 2500, pktSize: 1400},
+	"out-scan":          {name: "out-scan", baseline: 20_000, attack: 6_000, kind: "out-scan", sources: 60000, pktSize: 60},
 }
 
 func main() {
@@ -173,6 +179,9 @@ func secondOfTraffic(rng *rand.Rand, sc scenario, pfx netip.Prefix, victim netip
 		default:
 			add(encode.Flow{Src: src, Dst: h, Proto: 1, DurationMs: 1000}, perHost, 98)
 		}
+		// Normal replies going out: roughly half the inbound packet rate.
+		add(encode.Flow{Src: h, Dst: src, Proto: 6, SrcPort: 443, DstPort: uint16(1024 + rng.Intn(60000)),
+			TCPFlags: 0x18 | 0x10, DurationMs: 1000}, perHost/2, 1200)
 	}
 	if sc.attack == 0 {
 		return flows, wire
@@ -180,6 +189,29 @@ func secondOfTraffic(rng *rand.Rand, sc scenario, pfx netip.Prefix, victim netip
 	// Attack: split across a sample of sources so per-flow sampled counts stay realistic.
 	srcs := min(sc.sources, 400)
 	spread := hostsIn(pfx, 200)
+	if strings.HasPrefix(sc.kind, "out-") {
+		// The local address (victim flag) sends; peers are outside addresses in benchmark space.
+		if sc.kind == "out-scan" {
+			srcs = min(sc.sources, 6000) // one probe each: thousands of distinct targets per second
+		}
+		per := sc.attack / float64(srcs)
+		for i := 0; i < srcs; i++ {
+			f := encode.Flow{Src: victim, Dst: randAddr(rng, 0, sc.sources), DurationMs: 1000}
+			switch sc.kind {
+			case "out-syn":
+				f.Proto, f.SrcPort, f.DstPort, f.TCPFlags = 6, uint16(1024+rng.Intn(60000)), 443, 0x02
+			case "out-udp":
+				f.Proto, f.SrcPort, f.DstPort = 17, uint16(1024+rng.Intn(60000)), uint16(1+rng.Intn(65535))
+			case "out-dns":
+				f.Proto, f.SrcPort, f.DstPort = 17, 53, uint16(1024+rng.Intn(60000))
+			case "out-scan":
+				f.Proto, f.SrcPort, f.DstPort, f.TCPFlags = 6, uint16(1024+rng.Intn(60000)), 22, 0x02
+				f.Dst = randAddr(rng, 0, sc.sources)
+			}
+			add(f, per, sc.pktSize)
+		}
+		return flows, wire
+	}
 	per := sc.attack / float64(srcs)
 	for i := 0; i < srcs; i++ {
 		src := randAddr(rng, 0, sc.sources)

@@ -19,6 +19,14 @@ Decision model (per destination address, and per protected prefix for carpet bom
 Time only advances on seconds that have data. If the collector stops, nothing is resolved:
 missing data is not evidence that an attack ended.
 
+Outbound (per local sender, key "out:<ip>/32")
+------------------------------------------------
+Traffic FROM an address inside the protected prefixes TO the outside is checked the same way
+against the outbound thresholds (settings `outbound_*`): floods sent by a customer machine
+(out_syn_flood, out_udp_flood, ...), a server answering as a reflector/amplifier (dns_reflector,
+ntp_reflector, ...: UDP sent from that service port), and scanning (out_scan: very many distinct
+targets per second). Same state machine; no learned baseline.
+
 Confidence (0..1) = quality x (0.30 magnitude + 0.30 specificity + 0.25 persistence + 0.15 baseline)
   magnitude   how far over threshold (3x or more = 1.0)
   specificity how characteristic the vector is (see VECTOR_SPECIFICITY)
@@ -51,6 +59,17 @@ VECTOR_SPECIFICITY = {
     "udp_flood": 0.7, "carpet_bombing": 0.75, "volumetric_pps": 0.5, "volumetric_bps": 0.5,
     "traffic_anomaly": 0.3,
 }
+
+# Outbound vector names: inbound name -> the name used when a LOCAL address sends it.
+OUTBOUND_NAMES = {
+    **{v: v.replace("_amplification", "_reflector") for v in REFLECTION_VECTORS.values()},
+    "syn_flood": "out_syn_flood", "ack_flood": "out_ack_flood", "rst_flood": "out_rst_flood",
+    "icmp_flood": "out_icmp_flood", "fragment_flood": "out_fragment_flood", "udp_flood": "out_udp_flood",
+    "volumetric_pps": "out_volumetric_pps", "volumetric_bps": "out_volumetric_bps",
+}
+VECTOR_SPECIFICITY.update({OUTBOUND_NAMES[k]: v for k, v in list(VECTOR_SPECIFICITY.items()) if k in OUTBOUND_NAMES})
+VECTOR_SPECIFICITY["out_scan"] = 0.8
+OUTBOUND_KEY = "out:"
 
 SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 BASELINE_MIN_SAMPLES = 30
@@ -118,6 +137,28 @@ class ProfileSet:
                             dst_bps=o[1] if o[1] is not None else p.dst_bps)
             self._cache[key] = p
         return p
+
+
+@dataclass(frozen=True)
+class Outbound:
+    """Outbound thresholds (one set for all local senders). `profile` carries the rate thresholds
+    and timers; scan_targets is the distinct outside addresses per second that count as scanning."""
+    profile: Profile
+    scan_targets: float | None = 500
+
+    @classmethod
+    def from_settings(cls, get) -> "Outbound | None":
+        """`get(key, default)` reads a setting. None when outbound detection is switched off."""
+        if not get("outbound_detection", True):
+            return None
+        f = lambda k, d: None if get(k, d) in (None, 0, "") else float(get(k, d))  # noqa: E731
+        p = Profile(id=0, name="outbound", scope=ipaddress.ip_network("0.0.0.0/0"),
+                    dst_pps=f("outbound_pps", 50_000), dst_bps=f("outbound_bps", 500e6),
+                    syn_pps=f("outbound_syn_pps", 10_000), tcp_flag_pps=f("outbound_pps", 50_000),
+                    udp_pps=f("outbound_udp_pps", 30_000), icmp_pps=f("outbound_icmp_pps", 10_000),
+                    reflect_pps=f("outbound_reflect_pps", 5_000), frag_pps=f("outbound_udp_pps", 30_000),
+                    prefix_pps=None, prefix_bps=None)
+        return cls(profile=p, scan_targets=f("outbound_scan_targets", 500))
 
 
 # ---------------------------------------------------------------- samples & signals
@@ -213,6 +254,14 @@ def classify(s: Sample, p: Profile, baseline: tuple[float, float] | None = None)
         limit = max(p.anomaly_min_pps, (mean + 2.33 * std) * p.baseline_factor)
         if s.pps >= limit:
             out.append(Signal("traffic_anomaly", s.pps, limit))
+    return out
+
+
+def classify_outbound(s: Sample, ob: Outbound) -> list[Signal]:
+    """Signals for one local sender-second (traffic it sends out). `s.sources` = distinct targets."""
+    out = [Signal(OUTBOUND_NAMES.get(x.vector, x.vector), x.value, x.threshold, x.unit) for x in classify(s, ob.profile)]
+    if ob.scan_targets and s.sources >= ob.scan_targets:
+        out.append(Signal("out_scan", s.sources, ob.scan_targets, "targets"))
     return out
 
 
@@ -379,8 +428,9 @@ class _Track:
 class Engine:
     IDLE_FORGET_SECONDS = 600
 
-    def __init__(self, profiles: ProfileSet, baselines: Baselines | None = None):
+    def __init__(self, profiles: ProfileSet, baselines: Baselines | None = None, outbound: Outbound | None = None):
         self.profiles = profiles
+        self.outbound = outbound
         self.baselines = baselines or Baselines()
         self.tracks: dict[str, _Track] = {}
         self.suppressed: dict[str, int] = {}
@@ -388,10 +438,17 @@ class Engine:
         self._minute_sums: dict[str, tuple[float, int]] = {}
         self.last_ts: int | None = None
 
-    def set_profiles(self, profiles: ProfileSet) -> None:
+    def set_profiles(self, profiles: ProfileSet, outbound: Outbound | None = None) -> None:
         self.profiles = profiles
-        for t in self.tracks.values():
-            t.profile = profiles.for_net(ipaddress.ip_network(t.key))
+        self.outbound = outbound
+        for key, t in list(self.tracks.items()):
+            if t.scope == "outbound":
+                if outbound is None and t.status == "idle":
+                    self.tracks.pop(key, None)
+                elif outbound is not None:
+                    t.profile = outbound.profile
+            else:
+                t.profile = profiles.for_net(ipaddress.ip_network(t.key))
 
     # --- external control -------------------------------------------------------------------
     def restore(self, key: str, scope: str, prefix: str | None, status: str, started_ts: int,
@@ -440,6 +497,13 @@ class Engine:
                 agg.add(s)
                 tops[pfx] = max(tops.get(pfx, 0.0), s.pps)
 
+        # Outbound: local senders (no baseline learning; checked against the outbound thresholds).
+        if self.outbound is not None:
+            for d in snap.get("srcs", []):
+                key = OUTBOUND_KEY + _host_key(d["ip"])
+                seen.add(key)
+                events += self._step(key, "outbound", d.get("prefix"), ts, Sample.from_dst(d))
+
         # Prefix aggregates of the remaining traffic (carpet bombing).
         for pfx, agg in prefixes.items():
             agg.top_share = tops[pfx] / agg.pps if agg.pps else 1.0
@@ -458,10 +522,16 @@ class Engine:
         return events
 
     # --- internals ----------------------------------------------------------------------------
+    def _profile(self, key: str, scope: str) -> Profile:
+        if scope == "outbound":
+            ob = self.outbound
+            return ob.profile if ob else Outbound.from_settings(lambda k, d: d).profile
+        return self.profiles.for_net(ipaddress.ip_network(key))
+
     def _track(self, key: str, scope: str, prefix: str | None) -> _Track:
         t = self.tracks.get(key)
         if t is None:
-            t = _Track(key=key, scope=scope, prefix=prefix, profile=self.profiles.for_net(ipaddress.ip_network(key)))
+            t = _Track(key=key, scope=scope, prefix=prefix, profile=self._profile(key, scope))
             self.tracks[key] = t
         return t
 
@@ -469,13 +539,20 @@ class Engine:
         t = self.tracks.get(key)
         if t is None:
             # Fast path: do not allocate state for quiet destinations.
-            p = self.profiles.for_net(ipaddress.ip_network(key))
-            if s.pps < _min_threshold(p, scope):
+            p = self._profile(key, scope)
+            scanning = scope == "outbound" and self.outbound is not None and bool(self.outbound.scan_targets) \
+                and s.sources >= self.outbound.scan_targets
+            if s.pps < _min_threshold(p, scope) and not scanning:
                 return []
             t = self._track(key, scope, prefix)
         p = t.profile
         baseline = self.baselines.get(key, ts) if scope == "host" else None
-        signals = classify(s, p, baseline) if scope == "host" else classify_prefix(s, p)
+        if scope == "host":
+            signals = classify(s, p, baseline)
+        elif scope == "outbound":
+            signals = classify_outbound(s, self.outbound) if self.outbound else []
+        else:
+            signals = classify_prefix(s, p)
         hot = bool(signals)
         t.history.append((ts, hot))
         t.seen_ts = ts

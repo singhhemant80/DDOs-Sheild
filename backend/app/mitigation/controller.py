@@ -280,6 +280,8 @@ class Controller:
 
     @staticmethod
     def _matches(db: Session, p: MitigationPolicy, inc: AttackIncident, now: datetime) -> bool:
+        if getattr(inc, "direction", "inbound") == "outbound":
+            return False   # your own address attacking others: never mitigate it as a victim
         inside = db.execute(select(cast(str(inc.target), CIDR).op("<<=")(cast(str(p.scope), CIDR)))).scalar()
         if not inside:
             return False

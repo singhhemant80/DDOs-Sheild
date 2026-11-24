@@ -111,6 +111,14 @@ def checklist(db: Session) -> list[dict]:
     add("flows", "Flow data arriving from the routers", receiving,
         "Export NetFlow/IPFIX on the upstream interfaces to this server (port 2055/4739).", "/health", 3)
 
+    try:
+        snap = tm.live_snapshot()
+    except Exception:
+        snap = {}
+    out_seen = bool(snap.get("available") and (snap.get("out") or {}).get("pps"))
+    add("outbound", "Outgoing traffic in the flow data (finds your addresses attacking others)", out_seen,
+        "Also export flows on the customer-facing interfaces (docs/outbound.md).", "/", 3)
+
     from . import asn
     add("asn", "IP-to-ASN table installed (names attack sources)", asn.status().get("loaded"),
         "Run: sudo systemctl start shield-asn-update (needs internet access to iptoasn.com).", "/history", 3)

@@ -30,8 +30,11 @@ def incidents(db: Session, since: datetime, until: datetime, confirmed_only: boo
 
 def summary(db: Session, days: int | None = 30, since: datetime | None = None, until: datetime | None = None) -> dict:
     since, until = _window(days, since, until)
-    incs = incidents(db, since, until)
-    fps = [i for i in incidents(db, since, until, confirmed_only=False) if i.status == IncidentStatus.FALSE_POSITIVE]
+    every = incidents(db, since, until)
+    incs = [i for i in every if i.direction != "outbound"]     # attacks on you
+    outs = [i for i in every if i.direction == "outbound"]     # attacks sent from your addresses
+    fps = [i for i in incidents(db, since, until, confirmed_only=False)
+           if i.status == IncidentStatus.FALSE_POSITIVE and i.direction != "outbound"]
     now = datetime.now(UTC)
     dur = [((i.resolved_at or now) - i.first_detected_at).total_seconds() for i in incs]
     by_sev = Counter(i.severity.value for i in incs)
@@ -77,6 +80,11 @@ def summary(db: Session, days: int | None = 30, since: datetime | None = None, u
         "top_source_networks": sorted(asn.values(), key=lambda r: (-r["attacks"], -r["packets"]))[:10],
         "mitigations": {STRATEGY_WORD.get(k, k): dict(v) for k, v in mit.items()},
         "mitigations_total": len(acts), "mitigations_automatic": auto,
+        "outbound_attacks": len(outs),
+        "outbound_minutes": round(sum(((i.resolved_at or now) - i.first_detected_at).total_seconds() for i in outs) / 60),
+        "top_senders": [{"sender": t, "attacks": n, "customer": (custs.get(t) and custs[t].customer_ref) or None,
+                         "vectors": sorted({v for i in outs if str(i.target) == t for v in (i.vectors or [])})}
+                        for t, n in Counter(str(i.target) for i in outs).most_common(10)],
     }
 
 
@@ -93,6 +101,9 @@ def as_alert(s: dict, dedup_key: str, base_url: str = ""):
         lines.append("Main source networks: " + ", ".join(f"AS{r['asn']} {(r['as_name'] or '')[:20]}".strip()
                                                          for r in s["top_source_networks"][:3]))
     lines.append(f"Mitigations: {s['mitigations_total']} ({s['mitigations_automatic']} by policy)")
+    if s.get("outbound_attacks"):
+        lines.append(f"Outbound attacks from your addresses: {s['outbound_attacks']} ("
+                     + ", ".join(f"{t['sender']} ({t['attacks']})" for t in s["top_senders"][:3]) + ")")
     return Alert("report", "info", dedup_key, f"Shield report, last {'24 hours' if days == 1 else f'{days} days'}",
                  lines, None, (base_url.rstrip("/") + "/reports") if base_url else None)
 
@@ -102,7 +113,7 @@ def incidents_csv(db: Session, days: int | None = 30, since=None, until=None) ->
     custs = {str(c.address): c for c in db.execute(select(CustomerIpAssignment)).scalars()}
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["id", "target", "customer", "status", "severity", "vectors", "started_utc", "confirmed_utc", "ended_utc",
+    w.writerow(["id", "direction", "target", "customer", "status", "severity", "vectors", "started_utc", "confirmed_utc", "ended_utc",
                 "minutes", "peak_pps", "peak_bps", "confidence", "top_source_networks", "mitigations"])
     now = datetime.now(UTC)
     acts = defaultdict(list)
@@ -112,7 +123,7 @@ def incidents_csv(db: Session, days: int | None = 30, since=None, until=None) ->
         c = custs.get(str(i.target))
         nets = "; ".join(f"AS{a['asn']} {a.get('as_name') or ''} {round((a.get('share') or 0) * 100)}%".strip()
                          for a in ((i.sources_summary or {}).get("asns") or [])[:3] if a.get("asn") is not None)
-        w.writerow([i.id, str(i.target), c.customer_ref if c else "", i.status.value, i.severity.value, " ".join(i.vectors or []),
+        w.writerow([i.id, i.direction, str(i.target), c.customer_ref if c else "", i.status.value, i.severity.value, " ".join(i.vectors or []),
                     i.first_detected_at.isoformat(), i.confirmed_at.isoformat() if i.confirmed_at else "",
                     i.resolved_at.isoformat() if i.resolved_at else "",
                     round(((i.resolved_at or now) - i.first_detected_at).total_seconds() / 60, 1),

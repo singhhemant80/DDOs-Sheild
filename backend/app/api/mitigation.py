@@ -106,11 +106,21 @@ def _get(db: Session, action_id: uuid.UUID, lock: bool = False) -> MitigationAct
 
 
 # ---------------------------------------------------------------- plan / propose
+def _check_incident(db: Session, incident_id) -> None:
+    if not incident_id:
+        return
+    inc = db.get(AttackIncident, incident_id)
+    if inc is None:
+        raise HTTPException(422, "incident_id does not exist")
+    if inc.direction == "outbound":
+        raise HTTPException(422, "This is an outbound incident (your own address sending the attack). Shield's "
+                                 "mitigations protect your addresses from incoming traffic; stop the sender instead.")
+
+
 @router.post("/preview")
 def preview(body: PlanIn, _: Principal = Depends(require(Perm.MITIGATION_PROPOSE)), db: Session = Depends(get_db)):
     """What would be announced, every safety check, and the impact. Changes nothing."""
-    if body.incident_id and db.get(AttackIncident, body.incident_id) is None:
-        raise HTTPException(422, "incident_id does not exist")
+    _check_incident(db, body.incident_id)
     return dict(build_plan(db, body.request()))
 
 
@@ -118,8 +128,7 @@ def preview(body: PlanIn, _: Principal = Depends(require(Perm.MITIGATION_PROPOSE
 def propose(body: PlanIn, response: Response, p: Principal = Depends(require(Perm.MITIGATION_PROPOSE)),
             db: Session = Depends(get_db),
             idempotency_key: str = Header(..., alias="Idempotency-Key", pattern=r"^[A-Za-z0-9._:-]{8,100}$")):
-    if body.incident_id and db.get(AttackIncident, body.incident_id) is None:
-        raise HTTPException(422, "incident_id does not exist")
+    _check_incident(db, body.incident_id)
     key = f"user:{p.user.id}:{idempotency_key}"
     replay = bool(service.existing_for_key(db, key))
     try:

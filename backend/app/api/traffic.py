@@ -100,12 +100,16 @@ def destination_series(ip: str, minutes: int = Query(60, ge=1, le=60 * 24 * 90),
 
 @router.get("/traffic/top")
 def top_destinations(minutes: int = Query(60, ge=1, le=60 * 24 * 30), limit: int = Query(20, ge=1, le=200),
+                     direction: str = Query("inbound", pattern="^(inbound|outbound)$"),
                      _: Principal = Depends(require(Perm.VIEW))):
+    """Busiest protected destinations (inbound) or busiest local senders (outbound: "dst" is the
+    local sender, sources_max the most distinct outside targets it reached in one second)."""
     since = tm.utc(int(time.time()) - minutes * 60)
-    sql = """SELECT dst, any(prefix) AS prefix, max(pps) AS pps_max, avg(pps) AS pps_avg, max(bps) AS bps_max,
+    table = "out_1s" if direction == "outbound" else "dst_1s"
+    sql = f"""SELECT dst, any(prefix) AS prefix, max(pps) AS pps_max, avg(pps) AS pps_avg, max(bps) AS bps_max,
                     max(sources_est) AS sources_max, count() AS active_seconds
-             FROM dst_1s WHERE ts >= {since:DateTime('UTC')}
-             GROUP BY dst ORDER BY pps_max DESC LIMIT {limit:UInt32}"""
+             FROM {table} WHERE ts >= {{since:DateTime('UTC')}}
+             GROUP BY dst ORDER BY pps_max DESC LIMIT {{limit:UInt32}}"""
     try:
         rows = tm.ch_query(sql, {"since": since, "limit": limit})
     except tm.ClickHouseUnavailable:

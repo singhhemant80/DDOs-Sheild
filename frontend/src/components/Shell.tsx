@@ -7,7 +7,7 @@ import {
 import { useAuth } from "../lib/auth";
 import { api } from "../lib/api";
 import { useApi } from "../lib/hooks";
-import { useLive } from "../lib/live";
+import { isOutbound, useLive } from "../lib/live";
 import { ago } from "../lib/format";
 import { Button, Dialog, Lamp, Notice } from "./ui";
 import { RoadmapMini } from "../pages/Roadmap";
@@ -89,7 +89,9 @@ function StatusStrip() {
     } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
 
-  const { incidents } = useLive();
+  const { incidents: all } = useLive();
+  const incidents = all.filter((i) => !isOutbound(i));
+  const outbound = all.filter((i) => isOutbound(i) && i.status !== "suspected").length;
   const confirmed = incidents.filter((i) => i.status !== "suspected").length;
   const suspected = incidents.length - confirmed;
   return (
@@ -99,6 +101,10 @@ function StatusStrip() {
           confirmed ? <strong className="text-attack">{confirmed} attack{confirmed === 1 ? "" : "s"} under way{suspected ? `, ${suspected} suspected` : ""}</strong>
             : suspected ? <>{suspected} suspected, none confirmed</> : "No attacks"} />
       </NavLink>
+      {outbound > 0 && (
+        <NavLink to="/attacks" className="hover:underline">
+          <Lamp tone="warn" label={<strong className="text-warn">{outbound} outbound attack{outbound === 1 ? "" : "s"} from your addresses</strong>} />
+        </NavLink>)}
       <Lamp tone={collTone as any} label={
         <>Flow collector {c.collector === "up" ? `receiving (${ago(lastSeen)})` : c.collector === "degraded" ? "running, no exporters sending" : "not running"}</>
       } />
