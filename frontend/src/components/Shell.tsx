@@ -8,6 +8,7 @@ import { useAuth } from "../lib/auth";
 import { api } from "../lib/api";
 import { useApi } from "../lib/hooks";
 import { isOutbound, useLive } from "../lib/live";
+import { AttackToasts } from "./AttackAlerts";
 import { ago } from "../lib/format";
 import { Button, Dialog, Lamp, Notice } from "./ui";
 import { RoadmapMini } from "../pages/Roadmap";
@@ -250,6 +251,7 @@ export function Shell() {
         <main className="mx-auto max-w-[1440px] px-5 py-6">
           <RoutedPage />
         </main>
+        <AttackToasts />
       </div>
     </div>
   );

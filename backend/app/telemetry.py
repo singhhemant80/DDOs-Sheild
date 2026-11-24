@@ -165,6 +165,24 @@ class ClickHouseUnavailable(RuntimeError):
     pass
 
 
+_last_ch_error = ""
+
+
+def ch_reason() -> str:
+    """Why the last ClickHouse query failed, in words for the dashboard (no credentials in it)."""
+    e = _last_ch_error
+    if not e:
+        return "ClickHouse unavailable"
+    if "Connection refused" in e or "ConnectError" in e or "connect" in e.lower() and "refused" in e.lower():
+        return "ClickHouse is not running (connection refused on 127.0.0.1:8123): sudo systemctl start clickhouse-server"
+    if "Authentication failed" in e or "AUTHENTICATION_FAILED" in e or "password is incorrect" in e:
+        return ("ClickHouse rejects Shield's login: re-run the installer, which resets it from "
+                "/etc/crapplet-shield/collector.env")
+    if "UNKNOWN_TABLE" in e or "doesn't exist" in e:
+        return "ClickHouse table missing: re-run the installer to apply the schema (" + e[:160] + ")"
+    return "ClickHouse error: " + e[:200]
+
+
 def ch_query(sql: str, params: dict[str, Any] | None = None) -> list[dict]:
     """Run a read-only query using ClickHouse server-side parameters ({name:Type} placeholders),
     so user input is never interpolated into SQL."""
@@ -177,10 +195,19 @@ def ch_query(sql: str, params: dict[str, Any] | None = None) -> list[dict]:
         r = httpx.post(s.clickhouse_url, params=qp, content=sql.encode(), timeout=20,
                        headers={"X-ClickHouse-User": s.clickhouse_user, "X-ClickHouse-Key": s.clickhouse_password})
     except httpx.HTTPError as e:
+        _note_ch_error(f"{type(e).__name__}: {e}")
         raise ClickHouseUnavailable(str(e)) from e
     if r.status_code != 200:
+        _note_ch_error(r.text[:300])
         raise ClickHouseUnavailable(r.text[:300])
     return r.json().get("data", [])
+
+
+def _note_ch_error(msg: str) -> None:
+    global _last_ch_error
+    if msg != _last_ch_error:
+        logging.getLogger("shield.clickhouse").warning("ClickHouse query failed: %s", msg)
+    _last_ch_error = msg
 
 
 def clickhouse_ok() -> bool:

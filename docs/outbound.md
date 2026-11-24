@@ -41,6 +41,12 @@ fires with light or no sampling. Floods and reflection are detected reliably wit
 
 ## What you see
 
+- **Overview, top (v1.2.0): the DDoS alerts panel**, always visible, two boxes side by side:
+  **Incoming attacks** (each attacked address with the attack type, rate, the top attacker IPs
+  and their networks) and **Outgoing attacks** (each of your addresses that is attacking, the
+  attack type and the outside addresses it is sending to), plus the attacks that ended in the
+  last 24 hours. A pop-up appears on every page when an attack is confirmed, in either direction.
+
 - **Overview**: an orange banner when one of your addresses is attacking, the outbound rate and
   how many of your addresses are sending, and **Busiest senders right now (outbound)**.
 - **Active attacks**: a separate section *Outbound: your addresses attacking others*.

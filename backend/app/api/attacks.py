@@ -221,6 +221,69 @@ def summary(_: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(ge
     return out
 
 
+# Live peer summaries of open incidents are ClickHouse queries: computed at most every 20 s each.
+_PEER_CACHE: dict[uuid.UUID, tuple[float, dict | None]] = {}
+PEER_TTL = 20
+ALERT_OPEN_WITH_PEERS = 6
+
+
+def _peers(inc: AttackIncident, live: bool) -> dict | None:
+    """Top 3 peers: the attacking sources (inbound) or the targets (outbound), plus totals."""
+    if not live:
+        return _compact_peers(inc.sources_summary)
+    hit = _PEER_CACHE.get(inc.id)
+    if hit and time.time() - hit[0] < PEER_TTL:
+        return hit[1]
+    try:
+        out = _compact_peers(srcs.summarize(inc))
+    except Exception:   # ClickHouse down or no data: the panel shows the attack without peers
+        out = None
+    _PEER_CACHE[inc.id] = (time.time(), out)
+    if len(_PEER_CACHE) > 200:
+        for k in sorted(_PEER_CACHE, key=lambda k: _PEER_CACHE[k][0])[:100]:
+            _PEER_CACHE.pop(k, None)
+    return out
+
+
+def _compact_peers(summ: dict | None) -> dict | None:
+    if not summ or (not summ.get("available", True) and not summ.get("sources")):
+        return None
+    pick = lambda r: {k: r.get(k) for k in ("ip", "asn", "as_name", "country", "share", "proto", "src_port", "dst_port")}  # noqa: E731
+    return {"top": [pick(r) for r in (summ.get("sources") or [])[:3]],
+            "networks": [{k: a.get(k) for k in ("asn", "as_name", "country", "share")} for a in (summ.get("asns") or [])[:3]],
+            "count": summ.get("distinct_sources") or len(summ.get("sources") or []),
+            "max_at_once": summ.get("max_sources_per_window")}
+
+
+@router.get("/attacks/alerts")
+def alerts(hours: int = Query(24, ge=1, le=168), _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
+    """Dashboard alert panel: attacks on your network (inbound) and attacks sent from it (outbound),
+    open ones and those of the last `hours`, each with its top peers: the attacking source
+    addresses and networks (inbound), or the outside targets (outbound)."""
+    since = datetime.fromtimestamp(time.time() - hours * 3600, UTC)
+    open_rows = db.execute(select(AttackIncident).where(AttackIncident.status.in_(OPEN_INCIDENT_STATES))
+                           .order_by(AttackIncident.first_detected_at.desc()).limit(50)).scalars().all()
+    recent = db.execute(select(AttackIncident).where(
+        AttackIncident.status.notin_(OPEN_INCIDENT_STATES), AttackIncident.confirmed_at.is_not(None),
+        AttackIncident.first_detected_at >= since).order_by(AttackIncident.first_detected_at.desc()).limit(40)).scalars().all()
+    cust, pref, users = _lookups(db, list(open_rows) + list(recent))
+    rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    open_rows = sorted(open_rows, key=lambda i: (i.confirmed_at is None, rank.get(i.severity.value, 5)))
+    out: dict = {}
+    for direction in ("inbound", "outbound"):
+        o = [i for i in open_rows if i.direction == direction]
+        r = [i for i in recent if i.direction == direction]
+        out[direction] = {
+            "open": [{**IncidentOut.model_validate(_out(db, i, cust, pref, users)).model_dump(mode="json"),
+                      "peers": _peers(i, True) if n < ALERT_OPEN_WITH_PEERS else None} for n, i in enumerate(o)],
+            "recent": [{**IncidentOut.model_validate(_out(db, i, cust, pref, users)).model_dump(mode="json"),
+                        "peers": _peers(i, False)} for i in r[:10]],
+            "recent_count": len(r),
+        }
+    out["hours"] = hours
+    return out
+
+
 @router.get("/attacks/{incident_id}", response_model=IncidentDetail)
 def incident_detail(incident_id: uuid.UUID, _: Principal = Depends(require(Perm.VIEW)), db: Session = Depends(get_db)):
     inc = _get(db, incident_id)
@@ -266,7 +329,7 @@ def incident_series(incident_id: uuid.UUID, _: Principal = Depends(require(Perm.
         try:
             rows = tm.ch_query(sql, params)
         except tm.ClickHouseUnavailable:
-            return {"available": False, "reason": "ClickHouse unavailable", "points": []}
+            return {"available": False, "reason": tm.ch_reason(), "points": []}
         return {"available": True, "step_seconds": step, "from": start, "to": end, "points": rows,
                 "resolution": "1s", "direction": "outbound"}
     if minute:
@@ -296,7 +359,7 @@ def incident_series(incident_id: uuid.UUID, _: Principal = Depends(require(Perm.
     try:
         rows = tm.ch_query(sql, params)
     except tm.ClickHouseUnavailable:
-        return {"available": False, "reason": "ClickHouse unavailable", "points": []}
+        return {"available": False, "reason": tm.ch_reason(), "points": []}
     return {"available": True, "step_seconds": step, "from": start, "to": end, "points": rows,
             "resolution": "1m" if minute else "1s"}
 
@@ -313,7 +376,7 @@ def incident_sources(incident_id: uuid.UUID, _: Principal = Depends(require(Perm
     try:
         out = srcs.summarize(inc)
     except tm.ClickHouseUnavailable:
-        return {"available": False, "reason": "ClickHouse unavailable", "sources": [], "asns": [], "countries": [],
+        return {"available": False, "reason": tm.ch_reason(), "sources": [], "asns": [], "countries": [],
                 "stored": False}
     if closed and inc.resolved_at and (datetime.now(UTC) - inc.resolved_at).total_seconds() > 30:
         inc.sources_summary = out   # keep it beyond the per-source data's 90 days

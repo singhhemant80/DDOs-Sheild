@@ -275,3 +275,30 @@ def test_outbound_settings_ranges(client, admin):
     assert put("outbound_syn_pps", -1) == 422
     assert put("outbound_detection", False) == 200
     assert put("outbound_detection", 1) == 422
+
+
+def test_alerts_panel_lists_incoming_and_outgoing(client, as_role, db, prefix):
+    svc = DetectorService(rds=R)
+    for i in range(30):
+        snap = outflood(T0 + i)
+        snap["dsts"] = flood(T0 + i)["dsts"]
+        svc.process(snap)
+    noc = as_role(Role.NOC_OPERATOR)
+    r = client.get("/api/v1/attacks/alerts", headers=noc)
+    assert r.status_code == 200
+    a = r.json()
+    assert [x["direction"] for x in a["inbound"]["open"]] == ["inbound"]
+    assert [x["direction"] for x in a["outbound"]["open"]] == ["outbound"]
+    inc = a["outbound"]["open"][0]
+    assert inc["target"] == VKEY and inc["customer"]["customer_ref"] == "C-1042" and "peers" in inc
+    assert a["inbound"]["recent"] == [] and a["hours"] == 24
+    again = client.get("/api/v1/attacks/alerts", headers=noc).json()   # cached peers: same shape
+    for x in (a, again):
+        p = x["outbound"]["open"][0]["peers"]
+        assert p is None or set(p) == {"top", "networks", "count", "max_at_once"}
+    # Once ended it moves to "recent" (confirmed incidents of the last 24 h).
+    for i in range(125):
+        svc.process(outflood(T0 + 30 + i, 0))
+    a = client.get("/api/v1/attacks/alerts", headers=noc).json()
+    assert a["outbound"]["open"] == [] and a["outbound"]["recent_count"] == 1
+    assert a["inbound"]["recent_count"] == 1

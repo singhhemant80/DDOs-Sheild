@@ -63,7 +63,7 @@ def totals(minutes: int = Query(60, ge=1, le=60 * 24 * 90), _: Principal = Depen
     try:
         rows = tm.ch_query(sql, {"step": step, "since": since})
     except tm.ClickHouseUnavailable:
-        return {"available": False, "reason": "ClickHouse unavailable", "step_seconds": step, "points": []}
+        return {"available": False, "reason": tm.ch_reason(), "step_seconds": step, "points": []}
     return {"available": True, "source": f"totals_{src}", "step_seconds": step, "points": rows}
 
 
@@ -93,7 +93,7 @@ def destination_series(ip: str, minutes: int = Query(60, ge=1, le=60 * 24 * 90),
     try:
         rows = tm.ch_query(sql, {"step": step, "since": since, "dst": addr})
     except tm.ClickHouseUnavailable:
-        return {"available": False, "reason": "ClickHouse unavailable", "dst": addr, "points": []}
+        return {"available": False, "reason": tm.ch_reason(), "dst": addr, "points": []}
     return {"available": True, "dst": addr, "source": f"dst_{src}", "step_seconds": step, "points": rows,
             "note": "Seconds below the collector's store_min_pps threshold are not stored and appear as gaps."}
 
@@ -113,7 +113,7 @@ def top_destinations(minutes: int = Query(60, ge=1, le=60 * 24 * 30), limit: int
     try:
         rows = tm.ch_query(sql, {"since": since, "limit": limit})
     except tm.ClickHouseUnavailable:
-        return {"available": False, "reason": "ClickHouse unavailable", "rows": []}
+        return {"available": False, "reason": tm.ch_reason(), "rows": []}
     return {"available": True, "rows": rows}
 
 

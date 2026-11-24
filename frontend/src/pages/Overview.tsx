@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { LiveChart } from "../components/LiveChart";
+import { AttackAlerts } from "../components/AttackAlerts";
 import { Num, ProvLegend, ProvTag } from "../components/Provenance";
 import { Badge, Notice, Section, Select, Table } from "../components/ui";
 import { useApi, useLiveTraffic, type Dst } from "../lib/hooks";
@@ -41,26 +42,12 @@ export function Overview() {
   const saturated = (ifaces.data?.interfaces ?? []).filter((i) => i.saturated);
   const { incidents } = useLive();
   const inbound = incidents.filter((i) => !isOutbound(i));
-  const outbound = incidents.filter((i) => isOutbound(i) && i.status !== "suspected");
   const confirmedAttacks = inbound.filter((i) => i.status !== "suspected");
   const suspectedCount = inbound.length - confirmedAttacks.length;
 
   return (
     <div className="space-y-5">
-      {confirmedAttacks.length > 0 && (
-        <Link to="/attacks" className="block rounded-[3px] border border-attack bg-attack-soft px-4 py-3 text-attack hover:brightness-[0.98]">
-          <strong>{confirmedAttacks.length} attack{confirmedAttacks.length === 1 ? "" : "s"} under way:</strong>{" "}
-          {confirmedAttacks.slice(0, 3).map((i) => `${i.target.replace(/\/(32|128)$/, "")} (${vectorName(i.vectors[0] ?? "")}, ${pps(i.current?.pps ?? i.peak_pps)})`).join("; ")}
-          {confirmedAttacks.length > 3 && ` and ${confirmedAttacks.length - 3} more`}. Open active attacks.
-        </Link>
-      )}
-      {outbound.length > 0 && (
-        <Link to="/attacks" className="block rounded-[3px] border border-warn bg-warn-soft px-4 py-3 text-warn hover:brightness-[0.98]">
-          <strong>{outbound.length} of your address{outbound.length === 1 ? " is" : "es are"} sending attack traffic out:</strong>{" "}
-          {outbound.slice(0, 3).map((i) => `${i.target.replace(/\/(32|128)$/, "")} (${vectorName(i.vectors[0] ?? "")}, ${pps(i.current?.pps ?? i.peak_pps)})`).join("; ")}
-          {outbound.length > 3 && ` and ${outbound.length - 3} more`}. Check these machines.
-        </Link>
-      )}
+      <AttackAlerts />
       {saturated.map((i) => (
         <Notice key={`${i.agent}|${i.if_index}`} tone="attack">
           <strong>{i.upstream ?? i.if_name ?? `ifIndex ${i.if_index}`} is at {pct(i.in_util)} of capacity.</strong>{" "}
